@@ -8,7 +8,7 @@ Giving _Star Trek: Voyager_ the voice acting it never shipped with.
 
 When _Star Trek: Voyager_ came out, a lot of players expected the cast to actually
 talk — full voice acting, like you'd get in a modern game. Instead the dialogue is
-just text boxes. Voyice is a fan-made companion app that fixes that after the fact:
+just text boxes. Voyicer is a fan-made companion app collection that fixes that after the fact:
 it watches the game while you play, catches the dialogue as it appears on screen,
 and reads it out loud in a voice cloned from the real character.
 
@@ -79,7 +79,7 @@ For example, clips of Tuvok go in `apps/jeanlucrecord/samples/tuvok/`. A few
 short clips (a couple of sentences each) is plenty — the pipeline only uses
 them as a reference for cloning the voice, not as training data itself.
 
-Folders already exist for `chakotay`, `doctor`, `janeway`, `kim`, `paris`,
+Folders such as `chakotay`, `doctor`, `janeway`, `kim`, `paris`,
 `sevenofnine`, `torres`, and `tuvok` — byo clips.
 
 ### 4. Build the voice model
