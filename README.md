@@ -1,5 +1,7 @@
 # Star-Trek Voyicer
 
+![Star-Trek Voyicer Graphic](repo_graphic.png)
+
 Giving _Star Trek: Voyager_ the voice acting it never shipped with.
 
 ## Why this exists
