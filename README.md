@@ -1,4 +1,4 @@
-# Voyice
+# Star-Trek Voyicer
 
 Giving _Star Trek: Voyager_ the voice acting it never shipped with.
 
