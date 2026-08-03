@@ -102,6 +102,23 @@ e.g. `just generate-voice doctor`. This is the slow, automated part — it will:
 When it finishes, it prints the exact file paths to copy and which setting to
 update — see the next step.
 
+Run `nvidia-smi`, or watch the GPU graph in Task Manager if visible, to monitor
+CUDA utilization / performance:
+
+```bash
+nvidia-smi -l 1
+```
+
+To watch loss curves as training progresses, run TensorBoard against that
+character's training logs:
+
+```bash
+cd apps/jeanlucrecord
+uv run tensorboard --logdir work/<character>/training/lightning_logs
+```
+
+Then open <http://localhost:6006> in a browser.
+
 ### 5. Install the model into the live app
 
 Follow the copy/paste instructions printed at the end of step 4: copy the two
