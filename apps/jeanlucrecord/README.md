@@ -42,6 +42,16 @@ uv run python main.py <character> --stage smoketest
 uv run python main.py doctor --corpus-size 10 --stage dataset
 ```
 
+## Monitoring
+
+While the `train` stage is running, from another terminal:
+
+- GPU utilization: `nvidia-smi -l 1` (or `watch -n 1 nvidia-smi` on Linux/macOS)
+- Loss curves: `uv run tensorboard --logdir work/<character>/training/lightning_logs`, then open
+  <http://localhost:6006>. Requires `tensorboard` to be installed in the Docker training image
+  (see Dockerfile) — without it, Lightning silently falls back to a CSV-only logger
+  (`metrics.csv`, no `.tfevents`).
+
 ## Output
 
 `output/<character>.onnx` + `.onnx.json`. The `export` stage prints the exact commands to

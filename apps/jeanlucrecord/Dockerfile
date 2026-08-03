@@ -39,7 +39,11 @@ RUN pip install --upgrade wheel "setuptools<82"
 # fragile pip lines below don't invalidate this expensive layer's build cache.
 RUN pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 RUN pip install piper-phonemize-fix onnxruntime-gpu onnxsim onnx rich librosa \
-    pytorch-lightning==1.9.3 cython numpy
+    pytorch-lightning==1.9.3 cython numpy tensorboard
+# pytorch-lightning's default Trainer logger is TensorBoardLogger, but it
+# silently falls back to CSVLogger (metrics.csv, no .tfevents) when the
+# tensorboard package isn't importable -- installing it here is what makes
+# piper_train emit real tfevents instead.
 # piper_train hardcodes num_workers=1 (and never exposes it as a CLI flag, and
 # never passes pin_memory/persistent_workers), so the training DataLoader runs
 # single-process no matter what -- the GPU stalls waiting on one CPU thread to
