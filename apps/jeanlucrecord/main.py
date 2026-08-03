@@ -44,18 +44,23 @@ def run_docker(*args: str) -> None:
     )
 
 
-def stage_dataset(character: str, corpus_size: int) -> None:
+def stage_dataset(character: str, corpus_size: int, retry_failed: bool = False) -> None:
+    # generate_dataset() resumes internally from work/<character>/dataset/metadata.csv
+    # and failed.csv, so it's always safe (and cheap when already complete) to call
+    # this again
+    out_dir = APP_DIR / "work" / character / "dataset"
     raw_ref_wavs = sorted((APP_DIR / "samples" / character).glob("*.wav"))
     if not raw_ref_wavs:
         raise SystemExit(f"No reference wavs found in samples/{character}/")
     ref_dir = APP_DIR / "work" / character / "ref"
     ref_wavs = [normalize_ref_wav(p, ref_dir / p.name) for p in raw_ref_wavs]
     phrases = load_corpus(corpus_size)
-    out_dir = APP_DIR / "work" / character / "dataset"
-    generate_dataset(character, ref_wavs, phrases, out_dir)
+    generate_dataset(character, ref_wavs, phrases, out_dir, retry_failed=retry_failed)
 
 
 def stage_resample(character: str) -> None:
+    # cheap CPU-only step (no TTS/Whisper) -- always rerun so it reflects whatever
+    # the dataset stage currently has, rather than risk mirroring a stale dataset
     dataset_dir = APP_DIR / "work" / character / "dataset"
     resampled_dir = APP_DIR / "work" / character / "resampled"
     resampled_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +69,10 @@ def stage_resample(character: str) -> None:
 
 
 def stage_preprocess(character: str) -> None:
+    training_dir = APP_DIR / "work" / character / "training"
+    if (training_dir / "config.json").exists():
+        print(f"Preprocessed training data already exists at {training_dir}, skipping.")
+        return
     run_docker(
         "python3", "-m", "piper_train.preprocess",
         "--language", "en-us",
@@ -85,7 +94,21 @@ def stage_smoketest() -> None:
     )
 
 
+def find_latest_checkpoint(character: str) -> str | None:
+    training_dir = APP_DIR / "work" / character / "training"
+    checkpoints = list(training_dir.glob("**/*.ckpt"))
+    if not checkpoints:
+        return None
+    latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+    return latest.relative_to(APP_DIR).as_posix()
+
+
 def stage_train(character: str) -> None:
+    # resume fine-tuning from this character's own last checkpoint if a previous
+    # training run got partway through and crashed -- otherwise every rerun would
+    # silently restart from the base LJSpeech checkpoint and lose that progress
+    checkpoint = find_latest_checkpoint(character) or BASE_CHECKPOINT
+    print(f"Resuming training from checkpoint: {checkpoint}")
     run_docker(
         "python3", "-m", "piper_train",
         "--dataset-dir", f"work/{character}/training",
@@ -95,7 +118,7 @@ def stage_train(character: str) -> None:
         "--validation-split", "0.0",
         "--num-test-examples", "0",
         "--max_epochs", str(MAX_EPOCHS),
-        "--resume_from_checkpoint", BASE_CHECKPOINT,
+        "--resume_from_checkpoint", checkpoint,
         "--checkpoint-epochs", "1",
         "--quality", "high",
         "--precision", "32",
@@ -124,10 +147,16 @@ def main() -> None:
     parser.add_argument("character", help="Character name, matching samples/<character>/")
     parser.add_argument("--corpus-size", type=int, default=CORPUS_SIZE_DEFAULT)
     parser.add_argument("--stage", choices=STAGES, default="all")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry phrases previously recorded in failed.csv instead of skipping them "
+        "(e.g. after tuning exaggeration or swapping the reference wav).",
+    )
     args = parser.parse_args()
 
     if args.stage in ("all", "dataset"):
-        stage_dataset(args.character, args.corpus_size)
+        stage_dataset(args.character, args.corpus_size, args.retry_failed)
     if args.stage in ("all", "resample"):
         stage_resample(args.character)
     if args.stage in ("all", "preprocess"):
