@@ -11,7 +11,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from corpus import load_corpus  # noqa: E402
+from corpus import load_corpus, load_validation_sentences  # noqa: E402
 from generate_dataset import generate_dataset  # noqa: E402
 from resample import normalize_ref_wav, resample_dir  # noqa: E402
 
@@ -21,9 +21,22 @@ DOCKER_IMAGE = "jeanlucrecord-trainer"
 CORPUS_SIZE_DEFAULT = 1300
 BASE_CHECKPOINT = "checkpoints/ljspeech-2000.ckpt"
 MAX_EPOCHS = 3000
-BATCH_SIZE = 12
+# 12 -> 14: docs/dataloader-perf-spec.md profiling showed training is GPU-compute-bound
+# (DataLoader wait was <1% of total time), so a bigger batch amortizes per-step
+# forward/backward overhead over more samples. Kept to a smaller increment than the
+# usual 16 since headroom was thin (~1GB free of 8151MiB) at batch size 12 --
+# watch nvidia-smi memory.used on the next run regardless.
+BATCH_SIZE = 14
+# every_n_epochs for piper_train's ModelCheckpoint. 1 (checkpoint every epoch) gave
+# the finest-grained crash recovery but, combined with the Dockerfile's save_top_k=10,
+# meant the 10 retained checkpoints were 10 *consecutive* epochs -- nearly identical
+# in quality, useless for picking a meaningfully different one by ear. 20 spaces the
+# retained window out to 200 epochs of real training progress; a crash now loses at
+# most 19 epochs instead of <1, which is the trade-off for that.
+CHECKPOINT_EPOCHS = 20
+VALIDATION_SENTENCES = 8
 
-STAGES = ["all", "dataset", "resample", "preprocess", "smoketest", "train", "export"]
+STAGES = ["all", "dataset", "resample", "preprocess", "smoketest", "train", "export", "sample"]
 
 
 def run_docker(*args: str) -> None:
@@ -98,13 +111,16 @@ def stage_smoketest() -> None:
     )
 
 
-def find_latest_checkpoint(character: str) -> str | None:
+def find_all_checkpoints(character: str) -> list[Path]:
     training_dir = APP_DIR / "work" / character / "training"
-    checkpoints = list(training_dir.glob("**/*.ckpt"))
+    return sorted(training_dir.glob("**/*.ckpt"), key=lambda p: p.stat().st_mtime)
+
+
+def find_latest_checkpoint(character: str) -> str | None:
+    checkpoints = find_all_checkpoints(character)
     if not checkpoints:
         return None
-    latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
-    return latest.relative_to(APP_DIR).as_posix()
+    return checkpoints[-1].relative_to(APP_DIR).as_posix()
 
 
 def stage_train(character: str) -> None:
@@ -123,7 +139,7 @@ def stage_train(character: str) -> None:
         "--num-test-examples", "0",
         "--max_epochs", str(MAX_EPOCHS),
         "--resume_from_checkpoint", checkpoint,
-        "--checkpoint-epochs", "1",
+        "--checkpoint-epochs", str(CHECKPOINT_EPOCHS),
         "--quality", "high",
         # bf16 breaks training: piper_train's mel-spectrogram step calls torch.stft
         # (cuFFT) outside any autocast(enabled=False) block, and cuFFT has no bf16
@@ -133,9 +149,27 @@ def stage_train(character: str) -> None:
     )
 
 
-def stage_export(character: str) -> None:
-    run_docker("bash", "docker/export.sh", character)
+def stage_export(character: str, checkpoint: str | None = None) -> None:
+    # checkpoint lets you export a specific retained checkpoint (e.g. one picked by
+    # ear from stage_sample's output) instead of always the most recent by mtime --
+    # a later epoch isn't guaranteed to sound better.
+    run_docker("bash", "docker/export.sh", character, checkpoint or "")
     print_handoff(character)
+
+
+def stage_sample(character: str, num_sentences: int) -> None:
+    # Exports every currently-retained checkpoint (see Dockerfile's save_top_k=10)
+    # to its own ONNX model and synthesizes the same fixed held-out sentences
+    # (corpus.load_validation_sentences) from each, so they can be compared by ear
+    # under work/<character>/checkpoint_samples/<checkpoint-name>/*.wav before
+    # deciding which checkpoint to hand to stage_export.
+    if not find_all_checkpoints(character):
+        raise SystemExit(f"No checkpoints found for {character} under work/{character}/training/")
+    sentences_path = APP_DIR / "work" / character / "validation_sentences.txt"
+    sentences_path.write_text(
+        "\n".join(load_validation_sentences(num_sentences)) + "\n", encoding="utf-8"
+    )
+    run_docker("bash", "docker/sample_checkpoints.sh", character)
 
 
 def print_handoff(character: str) -> None:
@@ -161,6 +195,19 @@ def main() -> None:
         help="Retry phrases previously recorded in failed.csv instead of skipping them "
         "(e.g. after tuning exaggeration or swapping the reference wav).",
     )
+    parser.add_argument(
+        "--checkpoint",
+        help="For --stage export: path to a specific .ckpt to export (default: most "
+        "recent by mtime). Use after --stage sample to export whichever checkpoint "
+        "sounded best rather than assuming the latest one is.",
+    )
+    parser.add_argument(
+        "--num-validation-sentences",
+        type=int,
+        default=VALIDATION_SENTENCES,
+        help=f"For --stage sample: how many held-out sentences to synthesize per "
+        f"checkpoint (default: {VALIDATION_SENTENCES}).",
+    )
     args = parser.parse_args()
 
     if args.stage in ("all", "dataset"):
@@ -173,8 +220,10 @@ def main() -> None:
         stage_smoketest()
     if args.stage in ("all", "train"):
         stage_train(args.character)
+    if args.stage == "sample":
+        stage_sample(args.character, args.num_validation_sentences)
     if args.stage in ("all", "export"):
-        stage_export(args.character)
+        stage_export(args.character, args.checkpoint)
 
 
 if __name__ == "__main__":

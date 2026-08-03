@@ -52,12 +52,34 @@ RUN pip install piper-phonemize-fix onnxruntime-gpu onnxsim onnx rich librosa \
 # (Patched here, right before the editable install, so it doesn't invalidate the
 # expensive torch/pip layers above on rebuild.)
 RUN sed -i 's/num_workers: int = 1,/num_workers: int = 8,/' piper_train/vits/lightning.py
-RUN sed -i 's/num_workers=self.hparams.num_workers,/num_workers=self.hparams.num_workers,\n            pin_memory=True,\n            persistent_workers=True,/g' piper_train/vits/lightning.py
+# prefetch_factor defaults to 2 batches/worker; docs/dataloader-perf-spec.md Part 1
+# confirmed the Windows bind mount isn't the bottleneck (an A/B test against a
+# native volume showed identical throughput), but giving each of the 8 workers
+# more batches staged ahead is still a cheap, no-risk way to absorb whatever
+# per-batch jitter remains, independent of where that jitter comes from.
+RUN sed -i 's/num_workers=self.hparams.num_workers,/num_workers=self.hparams.num_workers,\n            prefetch_factor=4,\n            pin_memory=True,\n            persistent_workers=True,/g' piper_train/vits/lightning.py
+# piper_train builds ModelCheckpoint(every_n_epochs=args.checkpoint_epochs) with no
+# save_top_k, so Lightning's default (save_top_k=1) deletes every prior checkpoint
+# as soon as the next one is saved -- there is no way to compare an old checkpoint
+# against a new one after the fact, or recover if a later epoch trains worse.
+# save_top_k=10 keeps the 10 most recent checkpoints (no `monitor` is set, so
+# Lightning ranks purely by recency) instead of just the latest one. Combined with
+# main.py's --checkpoint-epochs spacing, this bounds disk use to ~10 checkpoints
+# (~1GB each for this model) while giving a real window of recent history to pick
+# a winner from with docker/sample_checkpoints.sh.
+RUN sed -i 's/trainer.callbacks = \[ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)\]/trainer.callbacks = [ModelCheckpoint(every_n_epochs=args.checkpoint_epochs, save_top_k=10)]/' piper_train/__main__.py
 # --no-deps here is required: piper-train's own metadata pins torch<2 and
 # pytorch-lightning~=1.7, which would otherwise downgrade the versions installed above.
 # Its real runtime deps (librosa etc.) are already satisfied by the line above.
 RUN pip install --no-deps -e .
 RUN ./build_monotonic_align.sh
+# src/python_run is Piper's separate inference-only package (published as piper-tts
+# on PyPI, console script `piper`) -- used by docker/sample_checkpoints.sh to
+# synthesize validation audio from each retained checkpoint's exported ONNX model,
+# for comparing checkpoint quality by ear. --no-deps for the same reason as above:
+# its requirements.txt (piper-phonemize~=1.1.0, onnxruntime<2) are already satisfied
+# by piper-phonemize-fix and onnxruntime-gpu installed earlier.
+RUN pip install --no-deps -e ../python_run
 
 WORKDIR /app
 # CUDA_LAUNCH_BLOCKING=1 was previously set here -- it forces every CUDA kernel
