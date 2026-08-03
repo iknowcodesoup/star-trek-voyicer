@@ -37,6 +37,10 @@ def run_docker(*args: str) -> None:
     subprocess.run(
         [
             "docker", "run", "--rm", "--gpus", "all",
+            # num_workers=8 DataLoader workers hand batches back to the main process
+            # over /dev/shm; Docker's 64MB default is enough for num_workers=1 but
+            # overflows with 8, killing workers with a "bus error" mid-epoch
+            "--shm-size", "8g",
             "-v", f"{APP_DIR.as_posix()}:/app", "-w", "/app",
             DOCKER_IMAGE, *args,
         ],
@@ -121,6 +125,10 @@ def stage_train(character: str) -> None:
         "--resume_from_checkpoint", checkpoint,
         "--checkpoint-epochs", "1",
         "--quality", "high",
+        # bf16 breaks training: piper_train's mel-spectrogram step calls torch.stft
+        # (cuFFT) outside any autocast(enabled=False) block, and cuFFT has no bf16
+        # kernel at all -- fails on the very first batch with
+        # "RuntimeError: cuFFT doesn't support tensor of type: BFloat16"
         "--precision", "32",
     )
 

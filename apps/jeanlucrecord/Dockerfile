@@ -40,6 +40,15 @@ RUN pip install --upgrade wheel "setuptools<82"
 RUN pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 RUN pip install piper-phonemize-fix onnxruntime-gpu onnxsim onnx rich librosa \
     pytorch-lightning==1.9.3 cython numpy
+# piper_train hardcodes num_workers=1 (and never exposes it as a CLI flag, and
+# never passes pin_memory/persistent_workers), so the training DataLoader runs
+# single-process no matter what -- the GPU stalls waiting on one CPU thread to
+# deserialize/collate each batch of preprocessed .pt tensors. Bump the default
+# and turn on pin_memory/persistent_workers so multiple workers actually get used.
+# (Patched here, right before the editable install, so it doesn't invalidate the
+# expensive torch/pip layers above on rebuild.)
+RUN sed -i 's/num_workers: int = 1,/num_workers: int = 8,/' piper_train/vits/lightning.py
+RUN sed -i 's/num_workers=self.hparams.num_workers,/num_workers=self.hparams.num_workers,\n            pin_memory=True,\n            persistent_workers=True,/g' piper_train/vits/lightning.py
 # --no-deps here is required: piper-train's own metadata pins torch<2 and
 # pytorch-lightning~=1.7, which would otherwise downgrade the versions installed above.
 # Its real runtime deps (librosa etc.) are already satisfied by the line above.
@@ -47,10 +56,13 @@ RUN pip install --no-deps -e .
 RUN ./build_monotonic_align.sh
 
 WORKDIR /app
+# CUDA_LAUNCH_BLOCKING=1 was previously set here -- it forces every CUDA kernel
+# launch to block synchronously, which serializes CPU/GPU work and was stalling
+# the GPU between batches. Re-add it temporarily (docker run -e CUDA_LAUNCH_BLOCKING=1)
+# only if you need an exact stack trace for a CUDA error.
 ENV HF_HOME=/app/.cache/huggingface
 ENV NUMBA_CACHE_DIR=/app/.cache/numba_cache
 ENV XDG_CACHE_HOME=/app/.cache
-ENV CUDA_LAUNCH_BLOCKING=1
 ENV TORCH_CPP_LOG_LEVEL=ERROR
 ENV TQDM_DISABLE=1
 # torch>=2.6 defaults torch.load to weights_only=True, which rejects the
