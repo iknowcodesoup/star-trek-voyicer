@@ -23,5 +23,8 @@ run-jeanlucrecord:
 # stage defaults to the full pipeline; pass one to resume a single step,
 # e.g. `just generate-voice doctor` or `just generate-voice doctor train`
 # stages: dataset, resample, preprocess, smoketest, train, export
-generate-voice character stage="all":
-    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run python main.py {{character}} --stage {{stage}}
+# checkpoint (export stage only): path to a specific .ckpt to export, e.g.
+# `just generate-voice doctor export work/doctor/training/epoch=100.ckpt`
+# omit it to export the most recently modified checkpoint.
+generate-voice character stage="all" checkpoint="":
+    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run python main.py {{character}} --stage {{stage}} $(if [ -n "{{checkpoint}}" ]; then echo "--checkpoint {{checkpoint}}"; fi)
