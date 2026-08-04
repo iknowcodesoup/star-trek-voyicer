@@ -26,7 +26,14 @@ def load_indexed(path: Path) -> dict[int, str]:
     indexed = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         idx_str, text = line.split("|", 1)
-        indexed[int(idx_str)] = text
+        # entries from an imported/YouTube-committed dataset use non-numeric ids
+        # (e.g. "clip_0016", "yt_<video_id>_clip_0007") -- not part of this
+        # corpus-index resume ledger, so ignore them rather than crash.
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            continue
+        indexed[idx] = text
     return indexed
 
 
@@ -90,7 +97,13 @@ def generate_dataset(
             for attempt in range(max_attempts):
                 if verified:
                     break
-                wav = model.generate(text, audio_prompt_path=str(ref_wav), exaggeration=0.2)
+                # exaggeration=0.5 and cfg_weight=0.5 are Chatterbox's own defaults; this
+                # pipeline previously generated the whole training corpus at exaggeration=0.2
+                # (below default), producing uniformly flat, deadpan reference audio that
+                # Piper (VITS) then faithfully memorized. Resemble's documented "expressive
+                # speech" recipe is exaggeration=0.7+ paired with a lower cfg_weight (~0.3),
+                # since higher exaggeration otherwise speeds up delivery.
+                wav = model.generate(text, audio_prompt_path=str(ref_wav), exaggeration=0.7, cfg_weight=0.3)
                 ta.save(str(fp), wav, model.sr)
 
                 transcript = whisper_model.transcribe(str(fp))["text"].strip()

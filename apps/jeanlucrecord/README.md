@@ -17,6 +17,7 @@ Piper is fine-tuned on the resulting dataset from its LJSpeech checkpoint.
 3. `uv sync`
 4. Requires Docker Desktop (with GPU support) for the fine-tuning stage only — dataset
    generation and verification run natively on CPU.
+5. `ffmpeg` and `yt-dlp` must be on PATH — only required for the `youtube-ingest` stage.
 
 ## Usage
 
@@ -27,7 +28,8 @@ uv run python main.py <character>
 Runs the full pipeline: dataset generation, resampling, Piper preprocessing, fine-tuning,
 and ONNX export. Takes hours (dataset generation) plus a multi-day training run.
 
-Run one stage at a time with `--stage {dataset,resample,preprocess,smoketest,train,export,sample}`
+Run one stage at a time with
+`--stage {dataset,resample,preprocess,smoketest,train,export,sample,import,youtube-ingest,youtube-commit}`
 — useful for resuming after the multi-day training stage without regenerating the dataset,
 and for the `smoketest` stage, which should be run once after building the Docker image and
 before a real training run, to confirm the GPU is usable inside the container:
@@ -41,6 +43,57 @@ uv run python main.py <character> --stage smoketest
 ```
 uv run python main.py doctor --corpus-size 10 --stage dataset
 ```
+
+## Alternative dataset sources
+
+`dataset`/`import`/`youtube-ingest`+`youtube-commit` are three different ways to populate
+`work/<character>/dataset/wavs/` + `metadata.csv`. Whichever one you use, `resample`,
+`preprocess`, `train`, etc. proceed exactly the same afterward.
+
+### Bring your own dataset
+
+If you already have clipped, transcribed audio (an `id|text` `metadata.csv` plus matching
+`<id>.wav` files, flat or under `wavs/`/`wav/` — e.g. `samples/cena/`), import it directly
+instead of generating a dataset with Chatterbox:
+
+```
+uv run python main.py cena --stage import --import-dir samples/cena
+uv run python main.py cena --stage resample
+uv run python main.py cena --stage preprocess
+uv run python main.py cena --stage train
+```
+
+Metadata rows with no matching wav are logged and dropped, not treated as an error.
+Re-running `--stage import` after adding more rows to the source folder only imports
+what's new.
+
+### YouTube ingestion
+
+Pull real audio from a YouTube video instead: downloads the audio, converts it to 22050 Hz
+mono, transcribes it, and cuts it into candidate clips at the transcript's sentence
+boundaries:
+
+```
+uv run python main.py picard --stage youtube-ingest --youtube-url https://www.youtube.com/watch?v=XXXXXXXXXXX
+```
+
+Since a source video may have more than one speaker or background noise, clips are **not**
+committed to the dataset automatically. Instead this writes
+`work/picard/youtube/<video_id>/review.csv` (clip id, a rough noise/quality score, and a
+`keep` column — sorted worst-quality-first, with clips scoring below
+`--quality-flag-threshold` defaulting to `keep=0`) alongside the actual clips under
+`work/picard/youtube/<video_id>/clips/`. Listen to any clip you're unsure about, edit
+`keep` to `0`/`1` in the CSV (any spreadsheet app works, it's a plain comma-delimited
+file), then commit the ones you kept:
+
+```
+uv run python main.py picard --stage youtube-commit
+```
+
+Ingesting the same URL again is a no-op (existing `review.csv` is left alone). Ingest more
+videos and re-run `youtube-commit` at any time — only newly-kept clips are merged in.
+Note commit is additive-only: flipping `keep` back to `0` after a clip has already been
+committed doesn't remove it from `dataset/`; delete its row + wav there by hand instead.
 
 ## Monitoring
 

@@ -62,12 +62,15 @@ RUN sed -i 's/num_workers=self.hparams.num_workers,/num_workers=self.hparams.num
 # save_top_k, so Lightning's default (save_top_k=1) deletes every prior checkpoint
 # as soon as the next one is saved -- there is no way to compare an old checkpoint
 # against a new one after the fact, or recover if a later epoch trains worse.
-# save_top_k=10 keeps the 10 most recent checkpoints (no `monitor` is set, so
-# Lightning ranks purely by recency) instead of just the latest one. Combined with
-# main.py's --checkpoint-epochs spacing, this bounds disk use to ~10 checkpoints
-# (~1GB each for this model) while giving a real window of recent history to pick
-# a winner from with docker/sample_checkpoints.sh.
-RUN sed -i 's/trainer.callbacks = \[ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)\]/trainer.callbacks = [ModelCheckpoint(every_n_epochs=args.checkpoint_epochs, save_top_k=10)]/' piper_train/__main__.py
+# save_top_k=-1 keeps every matching checkpoint instead of just the latest one.
+# NOTE: save_top_k=10 was tried first to bound this directly, but Lightning 1.9.3
+# rejects any save_top_k outside {-1, 0, 1} when monitor=None ("No quantity for
+# top_k to track") -- ranking "top k" needs a tracked metric, and this training
+# run has no validation split (--validation-split 0.0) and no single loss that
+# meaningfully ranks a GAN checkpoint as "better" anyway. So retention is bounded
+# on the host instead: main.py prunes work/<character>/training/**/*.ckpt down to
+# the most recent N while training runs (see CHECKPOINT_KEEP in main.py).
+RUN sed -i 's/trainer.callbacks = \[ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)\]/trainer.callbacks = [ModelCheckpoint(every_n_epochs=args.checkpoint_epochs, save_top_k=-1)]/' piper_train/__main__.py
 # --no-deps here is required: piper-train's own metadata pins torch<2 and
 # pytorch-lightning~=1.7, which would otherwise downgrade the versions installed above.
 # Its real runtime deps (librosa etc.) are already satisfied by the line above.
