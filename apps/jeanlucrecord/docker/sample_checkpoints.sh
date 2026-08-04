@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 character="$1"
+shift
 training_dir="work/$character/training"
 samples_dir="work/$character/checkpoint_samples"
 sentences_file="work/$character/validation_sentences.txt"
@@ -11,13 +12,12 @@ if [[ ! -f "$sentences_file" ]]; then
     exit 1
 fi
 
-checkpoints="$(find "$training_dir" -name '*.ckpt' -type f | sort)"
-if [[ -z "$checkpoints" ]]; then
-    echo "No checkpoints found under $training_dir" >&2
+if [[ "$#" -eq 0 ]]; then
+    echo "No checkpoints given" >&2
     exit 1
 fi
 
-while IFS= read -r checkpoint; do
+for checkpoint in "$@"; do
     name="$(basename "$checkpoint" .ckpt)"
     out_dir="$samples_dir/$name"
 
@@ -45,7 +45,7 @@ while IFS= read -r checkpoint; do
     done < "$sentences_file"
 
     echo "Sampled $name -> $out_dir ($i sentences)"
-done <<< "$checkpoints"
+done
 
 echo "Done. Listen under $samples_dir/<checkpoint-name>/*.wav, then export the winner with:"
 echo "  uv run python main.py $character --stage export --checkpoint <the .ckpt path>"

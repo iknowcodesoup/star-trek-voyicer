@@ -359,21 +359,33 @@ def stage_export(character: str, checkpoint: str | None = None) -> None:
     print_handoff(character)
 
 
-def stage_sample(character: str, num_sentences: int) -> None:
-    # Exports every currently-retained checkpoint (see CHECKPOINT_KEEP above)
-    # to its own ONNX model and synthesizes the same fixed held-out sentences
-    # (corpus.load_validation_sentences) from each, so they can be compared by ear
-    # under work/<character>/checkpoint_samples/<checkpoint-name>/*.wav before
-    # deciding which checkpoint to hand to stage_export.
-    if not find_all_checkpoints(character):
+def stage_sample(
+    character: str, num_sentences: int, checkpoint: str | None = None
+) -> None:
+    # Exports the requested checkpoint(s) to their own ONNX model and synthesizes
+    # the same fixed held-out sentences (corpus.load_validation_sentences) from
+    # each, so they can be compared by ear under
+    # work/<character>/checkpoint_samples/<checkpoint-name>/*.wav before deciding
+    # which checkpoint to hand to stage_export. Defaults to just the latest
+    # checkpoint; pass checkpoint="all" to sample every currently-retained one
+    # (see CHECKPOINT_KEEP above) like this used to do unconditionally.
+    all_checkpoints = find_all_checkpoints(character)
+    if not all_checkpoints:
         raise SystemExit(
             f"No checkpoints found for {character} under work/{character}/training/"
         )
+    if checkpoint == "all":
+        targets = [p.relative_to(APP_DIR).as_posix() for p in all_checkpoints]
+    elif checkpoint:
+        targets = [checkpoint]
+    else:
+        targets = [find_latest_checkpoint(character)]
+
     sentences_path = APP_DIR / "work" / character / "validation_sentences.txt"
     sentences_path.write_text(
         "\n".join(load_validation_sentences(num_sentences)) + "\n", encoding="utf-8"
     )
-    run_docker("bash", "docker/sample_checkpoints.sh", character)
+    run_docker("bash", "docker/sample_checkpoints.sh", character, *targets)
 
 
 def print_handoff(character: str) -> None:
@@ -406,8 +418,10 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         help="For --stage export: path to a specific .ckpt to export (default: most "
-        "recent by mtime). Use after --stage sample to export whichever checkpoint "
-        "sounded best rather than assuming the latest one is.",
+        "recent by mtime). For --stage sample: path to a specific .ckpt to sample, "
+        "or 'all' to sample every retained checkpoint (default: most recent only). "
+        "Use after --stage sample to export whichever checkpoint sounded best rather "
+        "than assuming the latest one is.",
     )
     parser.add_argument(
         "--num-validation-sentences",
@@ -485,7 +499,7 @@ def main() -> None:
     if args.stage in ("all", "train"):
         stage_train(args.character)
     if args.stage == "sample":
-        stage_sample(args.character, args.num_validation_sentences)
+        stage_sample(args.character, args.num_validation_sentences, args.checkpoint)
     if args.stage in ("all", "export"):
         stage_export(args.character, args.checkpoint)
 
