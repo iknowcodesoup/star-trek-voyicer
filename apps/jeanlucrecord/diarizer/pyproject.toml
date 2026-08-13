@@ -1,0 +1,17 @@
+[project]
+# Deliberately a separate project from jeanlucrecord, not a dependency group.
+#
+# chatterbox-tts pins torch==2.6.0 and pyannote.audio 4.x needs torch>=2.8.0, so
+# the two cannot share an environment. They never need to: chatterbox synthesizes
+# a dataset from a text corpus, pyannote splits real audio by speaker. They are
+# alternative dataset sources, so isolating them costs nothing.
+#
+# src/diarize.py runs diarize_worker.py in this environment as a subprocess.
+name = "jeanlucrecord-diarizer"
+version = "0.1.0"
+description = "Speaker diarization worker for jeanlucrecord"
+requires-python = ">=3.12"
+dependencies = [
+    "pyannote-audio>=4.0.7",
+    "soundfile>=0.14.0",
+]

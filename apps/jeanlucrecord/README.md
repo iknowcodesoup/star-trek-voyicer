@@ -18,6 +18,9 @@ Piper is fine-tuned on the resulting dataset from its LJSpeech checkpoint.
 4. Requires Docker Desktop (with GPU support) for the fine-tuning stage only — dataset
    generation and verification run natively on CPU.
 5. `ffmpeg` and `yt-dlp` must be on PATH — only required for the `youtube-ingest` stage.
+6. `just sync-diarizer` — only required for `--stage youtube-ingest --diarize`. Sets up a
+   separate environment for `pyannote.audio`, which needs a newer torch than
+   `chatterbox-tts` allows. See [Splitting a video by speaker](#splitting-a-video-by-speaker).
 
 ## Usage
 
@@ -29,7 +32,7 @@ Runs the full pipeline: dataset generation, resampling, Piper preprocessing, fin
 and ONNX export. Takes hours (dataset generation) plus a multi-day training run.
 
 Run one stage at a time with
-`--stage {dataset,resample,preprocess,smoketest,train,export,sample,import,youtube-ingest,youtube-commit}`
+`--stage {dataset,resample,preprocess,smoketest,train,export,sample,import,youtube-search,youtube-ingest,youtube-commit}`
 — useful for resuming after the multi-day training stage without regenerating the dataset,
 and for the `smoketest` stage, which should be run once after building the Docker image and
 before a real training run, to confirm the GPU is usable inside the container:
@@ -94,6 +97,113 @@ Ingesting the same URL again is a no-op (existing `review.csv` is left alone). I
 videos and re-run `youtube-commit` at any time — only newly-kept clips are merged in.
 Note commit is additive-only: flipping `keep` back to `0` after a clip has already been
 committed doesn't remove it from `dataset/`; delete its row + wav there by hand instead.
+
+#### Finding source videos
+
+`youtube-search` queries YouTube and prints candidates. It needs no character and writes
+nothing:
+
+```
+uv run python main.py --stage youtube-search --search-query "star trek voyager janeway"
+```
+
+#### Splitting a video by speaker
+
+Most real footage has more than one person talking. Add `--diarize` to split the audio by
+speaker before the clips reach `review.csv`:
+
+```
+uv run python main.py janeway --stage youtube-ingest --diarize \
+  --youtube-url https://www.youtube.com/watch?v=XXXXXXXXXXX
+```
+
+This adds two columns to `review.csv`:
+
+- `speaker_label` — `SPEAKER_00`, `SPEAKER_01`, and so on.
+- `speaker_coverage` — how much of the clip that speaker holds, from 0 to 1.
+
+A clip that no single speaker holds for `--min-speaker-coverage` (default 0.9) gets an
+empty `speaker_label` and defaults to `keep=0`. Two cases produce that, and both are
+unusable for training: two people talk at once, or the clip is mostly music and silence.
+Pass `--num-speakers N` when you already know how many people speak.
+
+**Setup.** Diarization runs in its own environment under `diarizer/`, because
+`pyannote.audio` needs `torch>=2.8` and `chatterbox-tts` pins `torch==2.6`. The two never
+run together — one synthesizes a dataset from a text corpus, the other splits real audio —
+so isolating them costs nothing. `src/diarize.py` runs `diarizer/diarize_worker.py` as a
+subprocess.
+
+```
+just sync-diarizer
+```
+
+**Token.** Both pyannote models are gated. Accept the terms for
+[pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+**and** [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0),
+create a [read token](https://huggingface.co/settings/tokens), then set `HF_TOKEN` or pass
+`--hf-token`. Without both approvals the download fails with a 401.
+
+The result is cached to `work/<character>/youtube/<video_id>/diarization.json`, so a re-run
+does not repeat it.
+
+Diarization uses the GPU when the diarizer environment's torch build has CUDA. The default
+build is CPU-only, which takes about as long as the audio. Start with short clips.
+
+#### Sending one video to several characters
+
+One episode can seed several voices. Write a `speaker_map.json` next to `review.csv`:
+
+```json
+{ "SPEAKER_00": "janeway", "SPEAKER_01": "chakotay", "SPEAKER_02": null }
+```
+
+`youtube-commit` then routes each speaker's kept clips into that character's own
+`work/<character>/dataset/`. A speaker mapped to `null` is discarded. A speaker missing
+from the map stays uncommitted, so you can correct the map and re-run. Without a
+`speaker_map.json`, every kept clip goes to the character named on the command line, which
+is the behaviour from before diarization existed.
+
+## HTTP control surface
+
+`api.py` lets an outside orchestrator drive this pipeline. It runs no stage itself: every
+job spawns `python main.py <character> --stage <stage>` and tails its output, so the
+command line stays the single definition of what each stage does.
+
+```
+just serve-jeanlucrecord        # http://127.0.0.1:8100
+```
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | reachability |
+| `GET` | `/search?query=&limit=` | search YouTube |
+| `GET` | `/characters` | characters with a `work/` directory |
+| `POST` | `/jobs` | start a stage, returns a `job_id` |
+| `GET` | `/jobs` · `/jobs/{id}` | job state |
+| `GET` | `/jobs/{id}/logs?offset=` | tail a job's output from a byte offset |
+| `DELETE` | `/jobs/{id}` | cancel, and stop the container |
+| `GET` | `/characters/{c}/videos/{v}/clips` | `review.csv` as JSON |
+| `PATCH` | `/characters/{c}/videos/{v}/clips` | set `keep` and `speaker_label` |
+| `PUT` | `/characters/{c}/videos/{v}/speaker-map` | write `speaker_map.json` |
+| `GET` | `/characters/{c}/videos/{v}/clips/{id}/audio` | play one clip |
+| `GET` | `/characters/{c}/training` | epoch, loss, and checkpoints |
+| `GET` | `/characters/{c}/samples` | checkpoint sample wavs |
+
+`POST /jobs` returns at once. It never waits for a stage to finish, because training takes
+days. Poll `/jobs/{id}` and read `/jobs/{id}/logs` for progress.
+
+The server binds to localhost. It sets no CORS origins by default, because the intended
+caller is another server, not a browser. Set `VOICE_FACTORY_CORS_ALLOW_ORIGINS` to a
+comma-separated list to change that.
+
+## Tests
+
+```
+just test-jeanlucrecord
+```
+
+Covers the speaker rejection rule in `src/diarize.py` and the commit routing in
+`src/review.py`. Both are pure functions, so the tests need no audio and no GPU.
 
 ## Monitoring
 
