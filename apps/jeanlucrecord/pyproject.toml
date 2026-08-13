@@ -1,4 +1,7 @@
 [project]
+# Speaker diarization is deliberately not a dependency here. pyannote.audio needs
+# torch>=2.8 and chatterbox-tts pins torch==2.6, so it lives in its own project
+# at diarizer/ and src/diarize.py runs it as a subprocess.
 name = "jeanlucrecord"
 version = "0.1.0"
 description = "Add your description here"
@@ -7,6 +10,10 @@ requires-python = ">=3.12"
 dependencies = [
     "chatterbox-tts>=0.1.7",
     "faster-whisper>=1.0.0",
+    # serves api.py, the HTTP control surface an orchestrator drives
+    "fastapi>=0.116.1",
+    # api.py posts job webhooks back to the orchestrator
+    "httpx>=0.28.1",
     "numpy>=1.24.0",
     "onnx>=1.22.0",
     "onnxruntime-gpu>=1.28.0",
@@ -18,11 +25,16 @@ dependencies = [
     # chatterbox-tts's resemble-perth dep imports pkg_resources, removed in setuptools>=81
     "setuptools<81",
     "soundfile>=0.14.0",
+    "uvicorn>=0.34.0",
     "yt-dlp>=2024.1.0",
 ]
 
 [dependency-groups]
 dev = [
     "black>=26.5.1",
+    "pytest>=8.3.4",
     "ruff>=0.16.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

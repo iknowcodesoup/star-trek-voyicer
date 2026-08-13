@@ -1,4 +1,5 @@
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -12,21 +13,49 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from dotenv import load_dotenv  # noqa: E402
+
 from corpus import load_corpus, load_validation_sentences  # noqa: E402
+from diarize import (
+    MIN_SPEAKER_COVERAGE,
+    assign_speakers,
+    count_by_speaker,
+    diarize,
+)  # noqa: E402
 from generate_dataset import generate_dataset  # noqa: E402
 from import_dataset import import_dataset  # noqa: E402
 from quality import FLAG_THRESHOLD_DB, clip_quality_score, is_flagged  # noqa: E402
 from resample import normalize_ref_wav, resample_dir  # noqa: E402
-from review import commit_reviewed_clips, write_review_csv  # noqa: E402
+from review import (
+    REVIEW_CSV_NAME,
+    SPEAKER_MAP_FILENAME,
+    commit_reviewed_clips,
+    write_review_csv,
+)  # noqa: E402
+from search import SEARCH_LIMIT_DEFAULT, search_videos  # noqa: E402
 from youtube_ingest import (
+    CLIPS_DIR_NAME,
+    CLIPS_NAME,
+    DIARIZATION_NAME,
+    FULL_WAV_NAME,
+    TRANSCRIPT_NAME,
     chunk_clips,
     download_audio,
+    read_json,
     resolve_video_id,
     transcribe,
+    write_json,
 )  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 DOCKER_IMAGE = "jeanlucrecord-trainer"
+
+HF_TOKEN_ENV_VAR = "HF_TOKEN"
+
+# Diarization needs a HuggingFace token. Read apps/jeanlucrecord/.env so it does
+# not have to be exported by hand before every run. An already-exported variable
+# wins, which is what override=False gives.
+load_dotenv(APP_DIR / ".env", override=False)
 
 CORPUS_SIZE_DEFAULT = 1300
 BASE_CHECKPOINT = "checkpoints/ljspeech-2000.ckpt"
@@ -36,7 +65,7 @@ MAX_EPOCHS = 3000
 # forward/backward overhead over more samples. Kept to a smaller increment than the
 # usual 16 since headroom was thin (~1GB free of 8151MiB) at batch size 12 --
 # watch nvidia-smi memory.used on the next run regardless.
-BATCH_SIZE = 14
+BATCH_SIZE = 12
 # every_n_epochs for piper_train's ModelCheckpoint. 1 (checkpoint every epoch) gave
 # the finest-grained crash recovery but, combined with CHECKPOINT_KEEP below,
 # meant the retained checkpoints were consecutive epochs -- nearly identical
@@ -62,12 +91,71 @@ STAGES = [
     "export",
     "sample",
     "import",
+    "youtube-search",
     "youtube-ingest",
+    "youtube-download",
+    "youtube-transcribe",
+    "youtube-chunk",
+    "youtube-diarize",
+    "youtube-review",
     "youtube-commit",
 ]
 
+# The five steps youtube-ingest runs, in order. Each one is also its own stage,
+# because retry granularity can never be finer than the unit of work: the
+# orchestrator runs them as separate jobs so a failure costs one step, not all
+# five. Running them by hand does the same thing in the same order.
+YOUTUBE_INGEST_STEPS = (
+    "youtube-download",
+    "youtube-transcribe",
+    "youtube-chunk",
+    "youtube-diarize",
+    "youtube-review",
+)
 
-def run_docker(*args: str) -> None:
+# Every stage that works on one video needs to know which video.
+YOUTUBE_STAGES_NEEDING_URL = ("youtube-ingest", *YOUTUBE_INGEST_STEPS)
+
+
+def dataset_dir_for(character: str) -> Path:
+    return APP_DIR / "work" / character / "dataset"
+
+
+_video_dirs: dict[tuple[str, str], Path] = {}
+
+
+def video_dir_for(character: str, url: str) -> Path:
+    """Where one video's ingest artifacts live.
+
+    Memoized because the composed youtube-ingest stage asks five times in a
+    row, and resolve_video_id costs a yt-dlp metadata request each time. When
+    the orchestrator drives the five steps, each is its own process and the
+    memo simply never gets a second hit.
+    """
+    key = (character, url)
+    if key not in _video_dirs:
+        _video_dirs[key] = (
+            APP_DIR / "work" / character / "youtube" / resolve_video_id(url)
+        )
+    return _video_dirs[key]
+
+
+def resolve_hf_token(hf_token: str | None) -> str:
+    token = hf_token or os.environ.get(HF_TOKEN_ENV_VAR)
+    if not token:
+        raise SystemExit(
+            f"Diarization needs a HuggingFace read token. Pass --hf-token or set "
+            f"{HF_TOKEN_ENV_VAR}. Accept the terms for pyannote/speaker-diarization-3.1 "
+            "and pyannote/segmentation-3.0 on huggingface.co first."
+        )
+    return token
+
+
+def container_name_for(character: str, stage: str) -> str:
+    return f"{DOCKER_IMAGE}-{character}-{stage}"
+
+
+def run_docker(*args: str, container_name: str | None = None) -> None:
     # calling docker directly (no intermediate shell script) sidesteps host bash
     # path-translation issues -- "bash" on PATH here resolves to the WSL launcher,
     # which doesn't understand MSYS-style paths like docker/run.sh would need
@@ -83,11 +171,16 @@ def run_docker(*args: str) -> None:
         ],
         check=True,
     )
+    # naming the container lets an outside caller stop it. Terminating this
+    # process alone leaves the container running, because docker run only
+    # forwards the signal when it owns the terminal -- see api.py's cancel path.
+    name_args = ["--name", container_name] if container_name else []
     subprocess.run(
         [
             "docker",
             "run",
             "--rm",
+            *name_args,
             "--gpus",
             "all",
             # num_workers=8 DataLoader workers hand batches back to the main process
@@ -157,47 +250,146 @@ def stage_import(character: str, import_dir: Path) -> None:
     mark_external_source(character, f"imported from {import_dir}")
 
 
-def stage_youtube_ingest(
-    character: str,
-    url: str,
-    whisper_model: str,
-    min_duration: float,
-    max_duration: float,
-    quality_flag_threshold: float,
-) -> None:
-    # writes candidate clips + a review.csv for manual accept/reject -- nothing
-    # here touches work/<character>/dataset/ directly, see stage_youtube_commit.
-    video_id = resolve_video_id(url)
-    video_dir = APP_DIR / "work" / character / "youtube" / video_id
-    review_path = video_dir / "review.csv"
-    if review_path.exists():
-        print(f"{url} already ingested, review at {review_path}")
+def stage_youtube_search(query: str, limit: int) -> None:
+    videos = search_videos(query, limit)
+    if not videos:
+        print(f"No results for {query!r}.")
         return
+    print(f"{len(videos)} result(s) for {query!r}:\n")
+    for video in videos:
+        duration = video["duration_sec"]
+        minutes = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "?"
+        print(f"  [{minutes:>7}] {video['title']}")
+        print(f"            {video['channel'] or 'unknown channel'} -- {video['url']}")
 
-    full_wav = download_audio(url, video_dir / "full.wav")
-    segments = transcribe(full_wav, whisper_model)
+
+def stage_youtube_download(character: str, url: str) -> None:
+    """Download the audio and transcode it to 22050 Hz mono.
+
+    Does nothing when full.wav is already there, so this is also the step to
+    rerun after ffmpeg or yt-dlp was missing. Delete full.wav to force a fresh
+    download -- every later step notices the audio changed under it.
+    """
+    full_wav = download_audio(url, video_dir_for(character, url) / FULL_WAV_NAME)
+    print(f"Audio ready at {full_wav}")
+
+
+def _require_audio(character: str, url: str) -> Path:
+    full_wav = video_dir_for(character, url) / FULL_WAV_NAME
+    if not full_wav.exists():
+        raise SystemExit(f"No audio at {full_wav}. Run --stage youtube-download first.")
+    return full_wav
+
+
+def stage_youtube_transcribe(character: str, url: str, whisper_model: str) -> None:
+    """Transcribe the audio to transcript.json. The slowest CPU step here."""
+    video_dir = video_dir_for(character, url)
+    segments = transcribe(
+        _require_audio(character, url), whisper_model, video_dir / TRANSCRIPT_NAME
+    )
     if not segments:
         raise SystemExit(f"No speech segments found in {url}")
+    print(f"{len(segments)} segment(s) at {video_dir / TRANSCRIPT_NAME}")
+
+
+def stage_youtube_chunk(
+    character: str, url: str, min_duration: float, max_duration: float
+) -> None:
+    """Cut the transcript's segments into clips, and record what survived."""
+    video_dir = video_dir_for(character, url)
+    transcript_path = video_dir / TRANSCRIPT_NAME
+    if not transcript_path.exists():
+        raise SystemExit(
+            f"No transcript at {transcript_path}. Run --stage youtube-transcribe first."
+        )
 
     clips = chunk_clips(
-        full_wav, segments, video_dir / "clips", min_duration, max_duration
+        _require_audio(character, url),
+        read_json(transcript_path),
+        video_dir / CLIPS_DIR_NAME,
+        min_duration,
+        max_duration,
     )
     if not clips:
-        print(
-            f"No clips survived duration filtering for {url} -- adjust --min/--max-clip-duration and retry."
+        raise SystemExit(
+            f"No clips survived duration filtering for {url} -- adjust "
+            "--min/--max-clip-duration and retry."
         )
+    write_json(video_dir / CLIPS_NAME, clips)
+    print(f"{len(clips)} clip(s) at {video_dir / CLIPS_DIR_NAME}")
+
+
+def _require_clips(video_dir: Path) -> list[dict]:
+    clips_path = video_dir / CLIPS_NAME
+    if not clips_path.exists():
+        raise SystemExit(f"No clips at {clips_path}. Run --stage youtube-chunk first.")
+    return read_json(clips_path)
+
+
+def stage_youtube_diarize(
+    character: str,
+    url: str,
+    hf_token: str | None = None,
+    num_speakers: int | None = None,
+    min_speaker_coverage: float = MIN_SPEAKER_COVERAGE,
+) -> None:
+    """Label each clip with the speaker who covers it.
+
+    Writes the speaker labels back into clips.json, so the review step reads
+    one file whether this ran or not.
+    """
+    video_dir = video_dir_for(character, url)
+    turns = diarize(
+        _require_audio(character, url),
+        resolve_hf_token(hf_token),
+        video_dir / DIARIZATION_NAME,
+        num_speakers=num_speakers,
+    )
+    clips = assign_speakers(_require_clips(video_dir), turns, min_speaker_coverage)
+    write_json(video_dir / CLIPS_NAME, clips)
+    print("\nClips per speaker:")
+    for speaker_label, count in count_by_speaker(clips).items():
+        print(f"  {speaker_label:<12} {count}")
+
+
+def stage_youtube_review(
+    character: str, url: str, quality_flag_threshold: float
+) -> None:
+    """Score every clip and write the review.csv an operator edits.
+
+    Never overwrites a review.csv that is already there. That file is the one
+    record of which clips a person accepted, and a retry that reached this step
+    must not throw those decisions away.
+    """
+    video_dir = video_dir_for(character, url)
+    review_path = video_dir / REVIEW_CSV_NAME
+    if review_path.exists():
+        print(f"Review already written at {review_path}, keeping its decisions.")
         return
+
+    clips = _require_clips(video_dir)
+    # The artifact is the record: diarization ran if and only if it left its
+    # cache behind, so no caller has to pass the flag through a second time.
+    enable_diarization = (video_dir / DIARIZATION_NAME).exists()
 
     rows = []
     for clip in clips:
-        score = clip_quality_score(video_dir / "clips" / f"{clip['clip_id']}.wav")
+        score = clip_quality_score(
+            video_dir / CLIPS_DIR_NAME / f"{clip['clip_id']}.wav"
+        )
         flagged = is_flagged(score, quality_flag_threshold)
+        speaker_label = clip.get("speaker_label")
+        # a clip no single speaker owns is cross-talk or noise -- default it to
+        # keep=0 for the same reason a low quality score does
+        rejected_by_diarization = enable_diarization and speaker_label is None
         rows.append(
             {
                 "clip_id": clip["clip_id"],
-                "keep": "0" if flagged else "1",
+                "keep": "0" if flagged or rejected_by_diarization else "1",
                 "quality_score": round(score, 2),
                 "flagged": int(flagged),
+                "speaker_label": speaker_label or "",
+                "speaker_coverage": round(clip.get("speaker_coverage", 0.0), 3),
                 "duration_sec": round(clip["duration"], 2),
                 "start_sec": round(clip["start"], 2),
                 "end_sec": round(clip["end"], 2),
@@ -211,10 +403,55 @@ def stage_youtube_ingest(
     print(
         f"{flagged_count} flagged as likely low quality (keep=0 by default, worst-scoring first)."
     )
+    if enable_diarization:
+        print(
+            f"\nWrite {video_dir / SPEAKER_MAP_FILENAME} to route each speaker to a "
+            'character, e.g. {"SPEAKER_00": "janeway", "SPEAKER_01": null}.'
+        )
     print(
-        f"Listen to clips under {video_dir / 'clips'}, edit the 'keep' column, then run:"
+        f"Listen to clips under {video_dir / CLIPS_DIR_NAME}, edit the 'keep' column, "
+        "then run:"
     )
     print(f"  uv run python main.py {character} --stage youtube-commit")
+
+
+def stage_youtube_ingest(
+    character: str,
+    url: str,
+    whisper_model: str,
+    min_duration: float,
+    max_duration: float,
+    quality_flag_threshold: float,
+    enable_diarization: bool = False,
+    hf_token: str | None = None,
+    num_speakers: int | None = None,
+    min_speaker_coverage: float = MIN_SPEAKER_COVERAGE,
+) -> None:
+    """Run every ingest step in order, for one command on the command line.
+
+    The steps stay separate stages underneath. The orchestrator starts them one
+    job at a time so a failure only costs the step that failed, and this is the
+    same sequence for anyone who would rather type it once. Nothing here touches
+    work/<character>/dataset/ -- see stage_youtube_commit.
+    """
+    video_dir = video_dir_for(character, url)
+    review_path = video_dir / REVIEW_CSV_NAME
+    if review_path.exists():
+        print(f"{url} already ingested, review at {review_path}")
+        return
+
+    # fail before downloading anything, not after the slowest step
+    if enable_diarization:
+        resolve_hf_token(hf_token)
+
+    stage_youtube_download(character, url)
+    stage_youtube_transcribe(character, url, whisper_model)
+    stage_youtube_chunk(character, url, min_duration, max_duration)
+    if enable_diarization:
+        stage_youtube_diarize(
+            character, url, hf_token, num_speakers, min_speaker_coverage
+        )
+    stage_youtube_review(character, url, quality_flag_threshold)
 
 
 def stage_youtube_commit(character: str) -> None:
@@ -223,14 +460,24 @@ def stage_youtube_commit(character: str) -> None:
         raise SystemExit(
             f"No ingested YouTube videos found for {character} under {youtube_dir}"
         )
-    out_dir = APP_DIR / "work" / character / "dataset"
-    newly_committed, already_committed = commit_reviewed_clips(youtube_dir, out_dir)
-    if newly_committed:
+    out_dir = dataset_dir_for(character)
+    result = commit_reviewed_clips(youtube_dir, out_dir, dataset_dir_for)
+
+    # a diarized video routes clips to several characters, so mark every dataset
+    # that actually gained clips -- not just the character named on the command
+    # line. Missing one lets a later --stage all overlay Chatterbox synthesis on
+    # top of that character's real audio.
+    for target, count in sorted(result.committed_by_target.items()):
+        target_character = target.parent.name
         mark_external_source(
-            character, f"{newly_committed} clip(s) committed from {youtube_dir}"
+            target_character, f"{count} clip(s) committed from {youtube_dir}"
         )
+        if target != out_dir:
+            print(f"  {count} clip(s) -> {target_character}")
+
     print(
-        f"Committed {newly_committed} new clip(s), {already_committed} already committed."
+        f"Committed {result.newly_committed} new clip(s), "
+        f"{result.already_committed} already committed."
     )
 
 
@@ -344,6 +591,7 @@ def stage_train(character: str) -> None:
             # "RuntimeError: cuFFT doesn't support tensor of type: BFloat16"
             "--precision",
             "32",
+            container_name=container_name_for(character, "train"),
         )
     finally:
         stop_pruning.set()
@@ -405,7 +653,10 @@ def main() -> None:
         description="Generate a fine-tuned Piper voice model for a character."
     )
     parser.add_argument(
-        "character", help="Character name, matching samples/<character>/"
+        "character",
+        nargs="?",
+        help="Character name, matching samples/<character>/. Optional for "
+        "--stage youtube-search, which searches YouTube and writes nothing.",
     )
     parser.add_argument("--corpus-size", type=int, default=CORPUS_SIZE_DEFAULT)
     parser.add_argument("--stage", choices=STAGES, default="all")
@@ -468,17 +719,59 @@ def main() -> None:
         help="For --stage youtube-ingest: clips scoring below this default to keep=0 "
         f"in review.csv (default: {FLAG_THRESHOLD_DB}).",
     )
+    parser.add_argument(
+        "--diarize",
+        action="store_true",
+        help="For --stage youtube-ingest: split the audio by speaker with pyannote and "
+        "record a speaker_label per clip. Clips no single speaker owns (cross-talk, "
+        "music) default to keep=0. Needs a HuggingFace token, see --hf-token.",
+    )
+    parser.add_argument(
+        "--num-speakers",
+        type=int,
+        help="For --diarize: exact speaker count, when you know it. Omit to let "
+        "pyannote decide.",
+    )
+    parser.add_argument(
+        "--min-speaker-coverage",
+        type=float,
+        default=MIN_SPEAKER_COVERAGE,
+        help="For --diarize: a clip must be this fraction single-speaker to earn a "
+        f"label (default: {MIN_SPEAKER_COVERAGE}).",
+    )
+    parser.add_argument(
+        "--hf-token",
+        help=f"HuggingFace read token for the pyannote models. Falls back to the "
+        f"{HF_TOKEN_ENV_VAR} environment variable.",
+    )
+    parser.add_argument(
+        "--search-query",
+        help="For --stage youtube-search: phrase to search YouTube for.",
+    )
+    parser.add_argument(
+        "--search-limit",
+        type=int,
+        default=SEARCH_LIMIT_DEFAULT,
+        help=f"For --stage youtube-search: how many results to return (default: "
+        f"{SEARCH_LIMIT_DEFAULT}).",
+    )
     args = parser.parse_args()
 
     if args.stage == "import" and not args.import_dir:
         parser.error("--stage import requires --import-dir")
-    if args.stage == "youtube-ingest" and not args.youtube_url:
-        parser.error("--stage youtube-ingest requires --youtube-url")
+    if args.stage in YOUTUBE_STAGES_NEEDING_URL and not args.youtube_url:
+        parser.error(f"--stage {args.stage} requires --youtube-url")
+    if args.stage == "youtube-search" and not args.search_query:
+        parser.error("--stage youtube-search requires --search-query")
+    if args.stage != "youtube-search" and not args.character:
+        parser.error(f"--stage {args.stage} requires a character")
 
     if args.stage in ("all", "dataset"):
         stage_dataset(args.character, args.corpus_size, args.retry_failed)
     if args.stage == "import":
         stage_import(args.character, Path(args.import_dir))
+    if args.stage == "youtube-search":
+        stage_youtube_search(args.search_query, args.search_limit)
     if args.stage == "youtube-ingest":
         stage_youtube_ingest(
             args.character,
@@ -487,6 +780,33 @@ def main() -> None:
             args.min_clip_duration,
             args.max_clip_duration,
             args.quality_flag_threshold,
+            args.diarize,
+            args.hf_token,
+            args.num_speakers,
+            args.min_speaker_coverage,
+        )
+    if args.stage == "youtube-download":
+        stage_youtube_download(args.character, args.youtube_url)
+    if args.stage == "youtube-transcribe":
+        stage_youtube_transcribe(args.character, args.youtube_url, args.whisper_model)
+    if args.stage == "youtube-chunk":
+        stage_youtube_chunk(
+            args.character,
+            args.youtube_url,
+            args.min_clip_duration,
+            args.max_clip_duration,
+        )
+    if args.stage == "youtube-diarize":
+        stage_youtube_diarize(
+            args.character,
+            args.youtube_url,
+            args.hf_token,
+            args.num_speakers,
+            args.min_speaker_coverage,
+        )
+    if args.stage == "youtube-review":
+        stage_youtube_review(
+            args.character, args.youtube_url, args.quality_flag_threshold
         )
     if args.stage == "youtube-commit":
         stage_youtube_commit(args.character)
