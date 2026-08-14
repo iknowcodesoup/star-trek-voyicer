@@ -200,6 +200,59 @@ def test_review_csv_written_before_diarization_still_commits(tmp_path):
     assert read_metadata(out_dir) == ["yt_vid1_clip_0001|an older line"]
 
 
+def test_out_dir_none_skips_unmapped_and_undiarized_rows(tmp_path):
+    """The batched, multi-character commit route has no single "committing
+    character" to fall back to. out_dir=None must leave those rows
+    uncommitted instead of guessing -- never silently route them anywhere."""
+    youtube_dir = tmp_path / "youtube"
+    # SPEAKER_00 is mapped, SPEAKER_09 is not, and clip_0003 was never diarized
+    video_dir = build_video(
+        youtube_dir,
+        "vid1",
+        [
+            row("clip_0001", speaker_label="SPEAKER_00"),
+            row("clip_0002", speaker_label="SPEAKER_09"),
+            row("clip_0003", speaker_label=""),
+        ],
+    )
+    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
+    work_dir = tmp_path / "work"
+
+    def dataset_dir_for(character: str) -> Path:
+        return work_dir / character / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, None, dataset_dir_for)
+
+    assert result.newly_committed == 1
+    assert read_metadata(dataset_dir_for("janeway")) == [
+        "yt_vid1_clip_0001|line for clip_0001"
+    ]
+    # neither the unmapped speaker nor the undiarized row landed anywhere,
+    # and neither counted as committed
+    committed_text = (youtube_dir / "vid1" / "committed.csv").read_text()
+    assert "clip_0001" in committed_text
+    assert "clip_0002" not in committed_text
+    assert "clip_0003" not in committed_text
+
+
+def test_out_dir_none_with_no_map_at_all_skips_every_row(tmp_path):
+    """A video with no speaker_map.json and dataset_dir_for set is already
+    skipped at the video level (see the shared-scan test above). out_dir=None
+    is the second guard: even if that video-level skip were ever bypassed,
+    the row-level fallback must not guess either."""
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001")])
+    work_dir = tmp_path / "work"
+
+    def dataset_dir_for(character: str) -> Path:
+        return work_dir / character / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, None, dataset_dir_for)
+
+    assert result.newly_committed == 0
+    assert result.committed_by_target == {}
+
+
 def test_speaker_map_round_trips(tmp_path):
     written = write_speaker_map(tmp_path, {"SPEAKER_00": "janeway", "SPEAKER_01": None})
 
