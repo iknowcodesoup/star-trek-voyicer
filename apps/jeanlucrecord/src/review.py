@@ -105,9 +105,20 @@ def commit_reviewed_clips(
             if not review_path.exists():
                 continue
             video_id = video_dir.name
+            speaker_targets = load_speaker_targets(video_dir, dataset_dir_for)
+
+            # dataset_dir_for is only ever omitted by tests exercising the
+            # no-routing case. Every real caller (stage_youtube_commit) passes
+            # it, and youtube_dir is shared across every character since this
+            # story, so a video with no speaker_map.json here is unclaimed --
+            # not "assume it's mine" the way a character-scoped scan used to
+            # read it. Skipping before touching committed.csv is what keeps
+            # this commit run from marking someone else's clips as handled.
+            if dataset_dir_for is not None and speaker_targets is None:
+                continue
+
             committed_path = video_dir / "committed.csv"
             committed = load_committed(committed_path)
-            speaker_targets = load_speaker_targets(video_dir, dataset_dir_for)
 
             with open(committed_path, "a", encoding="utf-8") as committed_file:
                 for row in read_review_csv(review_path):
@@ -163,10 +174,54 @@ def load_speaker_targets(
     }
 
 
+class SpeakerMapConflict(Exception):
+    """A merge would silently overwrite an already-recorded, different
+    assignment for one or more speaker labels.
+
+    Same corruption class patch_clips's 409 already guards a clip's
+    speaker_label against, one layer up: a video's speaker_map.json can now
+    carry assignments from more than one character's claim, so silently
+    replacing an earlier claim's non-null value is never safe. api.py turns
+    this into a 409 instead of applying the write.
+    """
+
+    def __init__(self, conflicting_labels: list[str]) -> None:
+        self.conflicting_labels = conflicting_labels
+        super().__init__(
+            "speaker(s) already carry a different recorded assignment: "
+            + ", ".join(conflicting_labels)
+        )
+
+
 def write_speaker_map(video_dir: Path, speaker_map: dict[str, str | None]) -> Path:
+    """Merge speaker_map into video_dir/speaker_map.json, not replace it.
+
+    A video's map used to belong to one character for its whole lifetime, so
+    overwriting it outright was safe. Now that a second character can claim
+    the same shared video later, replacing the file would erase the first
+    character's assignments -- this merges the new keys in instead, so an
+    earlier claim's speaker->character routing survives a later one's.
+
+    Raises SpeakerMapConflict, and writes nothing, when the request would
+    change an existing non-null value for a speaker label to something else.
+    A new label, or the same value resubmitted, always succeeds.
+    """
     map_path = video_dir / SPEAKER_MAP_FILENAME
     map_path.parent.mkdir(parents=True, exist_ok=True)
-    map_path.write_text(json.dumps(speaker_map, indent=2), encoding="utf-8")
+    existing = (
+        json.loads(map_path.read_text(encoding="utf-8")) if map_path.exists() else {}
+    )
+    conflicts = sorted(
+        speaker_label
+        for speaker_label, current in existing.items()
+        if current is not None
+        and speaker_label in speaker_map
+        and speaker_map[speaker_label] != current
+    )
+    if conflicts:
+        raise SpeakerMapConflict(conflicts)
+    merged = {**existing, **speaker_map}
+    map_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
     return map_path
 
 
@@ -175,7 +230,13 @@ def _resolve_target(
     out_dir: Path,
     speaker_targets: dict[str, Path] | None,
 ) -> Path | None:
-    if not speaker_targets:
+    # None means no map at all -- the pre-diarization behaviour, send
+    # everything to out_dir. An empty dict is different: it means a map
+    # exists and every speaker in it was explicitly discarded (mapped to
+    # null), so falling back to out_dir here would be the same unsafe
+    # "assume it's mine" guess this story removes from the video-level scan
+    # above, just one row at a time instead of one video at a time.
+    if speaker_targets is None:
         return out_dir
     speaker_label = row.get("speaker_label")
     if not speaker_label:

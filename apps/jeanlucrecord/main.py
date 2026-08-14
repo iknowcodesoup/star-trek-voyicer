@@ -121,23 +121,24 @@ def dataset_dir_for(character: str) -> Path:
     return APP_DIR / "work" / character / "dataset"
 
 
-_video_dirs: dict[tuple[str, str], Path] = {}
+_video_dirs: dict[str, Path] = {}
 
 
-def video_dir_for(character: str, url: str) -> Path:
+def video_dir_for(url: str) -> Path:
     """Where one video's ingest artifacts live.
+
+    Shared across every character: claiming an already-ingested video for a
+    second character reads the same directory, so download/transcribe/diarize
+    never repeat.
 
     Memoized because the composed youtube-ingest stage asks five times in a
     row, and resolve_video_id costs a yt-dlp metadata request each time. When
     the orchestrator drives the five steps, each is its own process and the
     memo simply never gets a second hit.
     """
-    key = (character, url)
-    if key not in _video_dirs:
-        _video_dirs[key] = (
-            APP_DIR / "work" / character / "youtube" / resolve_video_id(url)
-        )
-    return _video_dirs[key]
+    if url not in _video_dirs:
+        _video_dirs[url] = APP_DIR / "work" / "youtube" / resolve_video_id(url)
+    return _video_dirs[url]
 
 
 def resolve_hf_token(hf_token: str | None) -> str:
@@ -263,40 +264,38 @@ def stage_youtube_search(query: str, limit: int) -> None:
         print(f"            {video['channel'] or 'unknown channel'} -- {video['url']}")
 
 
-def stage_youtube_download(character: str, url: str) -> None:
+def stage_youtube_download(url: str) -> None:
     """Download the audio and transcode it to 22050 Hz mono.
 
     Does nothing when full.wav is already there, so this is also the step to
     rerun after ffmpeg or yt-dlp was missing. Delete full.wav to force a fresh
     download -- every later step notices the audio changed under it.
     """
-    full_wav = download_audio(url, video_dir_for(character, url) / FULL_WAV_NAME)
+    full_wav = download_audio(url, video_dir_for(url) / FULL_WAV_NAME)
     print(f"Audio ready at {full_wav}")
 
 
-def _require_audio(character: str, url: str) -> Path:
-    full_wav = video_dir_for(character, url) / FULL_WAV_NAME
+def _require_audio(url: str) -> Path:
+    full_wav = video_dir_for(url) / FULL_WAV_NAME
     if not full_wav.exists():
         raise SystemExit(f"No audio at {full_wav}. Run --stage youtube-download first.")
     return full_wav
 
 
-def stage_youtube_transcribe(character: str, url: str, whisper_model: str) -> None:
+def stage_youtube_transcribe(url: str, whisper_model: str) -> None:
     """Transcribe the audio to transcript.json. The slowest CPU step here."""
-    video_dir = video_dir_for(character, url)
+    video_dir = video_dir_for(url)
     segments = transcribe(
-        _require_audio(character, url), whisper_model, video_dir / TRANSCRIPT_NAME
+        _require_audio(url), whisper_model, video_dir / TRANSCRIPT_NAME
     )
     if not segments:
         raise SystemExit(f"No speech segments found in {url}")
     print(f"{len(segments)} segment(s) at {video_dir / TRANSCRIPT_NAME}")
 
 
-def stage_youtube_chunk(
-    character: str, url: str, min_duration: float, max_duration: float
-) -> None:
+def stage_youtube_chunk(url: str, min_duration: float, max_duration: float) -> None:
     """Cut the transcript's segments into clips, and record what survived."""
-    video_dir = video_dir_for(character, url)
+    video_dir = video_dir_for(url)
     transcript_path = video_dir / TRANSCRIPT_NAME
     if not transcript_path.exists():
         raise SystemExit(
@@ -304,7 +303,7 @@ def stage_youtube_chunk(
         )
 
     clips = chunk_clips(
-        _require_audio(character, url),
+        _require_audio(url),
         read_json(transcript_path),
         video_dir / CLIPS_DIR_NAME,
         min_duration,
@@ -327,7 +326,6 @@ def _require_clips(video_dir: Path) -> list[dict]:
 
 
 def stage_youtube_diarize(
-    character: str,
     url: str,
     hf_token: str | None = None,
     num_speakers: int | None = None,
@@ -338,9 +336,9 @@ def stage_youtube_diarize(
     Writes the speaker labels back into clips.json, so the review step reads
     one file whether this ran or not.
     """
-    video_dir = video_dir_for(character, url)
+    video_dir = video_dir_for(url)
     turns = diarize(
-        _require_audio(character, url),
+        _require_audio(url),
         resolve_hf_token(hf_token),
         video_dir / DIARIZATION_NAME,
         num_speakers=num_speakers,
@@ -352,16 +350,14 @@ def stage_youtube_diarize(
         print(f"  {speaker_label:<12} {count}")
 
 
-def stage_youtube_review(
-    character: str, url: str, quality_flag_threshold: float
-) -> None:
+def stage_youtube_review(url: str, quality_flag_threshold: float) -> None:
     """Score every clip and write the review.csv an operator edits.
 
     Never overwrites a review.csv that is already there. That file is the one
     record of which clips a person accepted, and a retry that reached this step
     must not throw those decisions away.
     """
-    video_dir = video_dir_for(character, url)
+    video_dir = video_dir_for(url)
     review_path = video_dir / REVIEW_CSV_NAME
     if review_path.exists():
         print(f"Review already written at {review_path}, keeping its decisions.")
@@ -410,13 +406,12 @@ def stage_youtube_review(
         )
     print(
         f"Listen to clips under {video_dir / CLIPS_DIR_NAME}, edit the 'keep' column, "
-        "then run:"
+        "then run, for each character this video's clips should reach:"
     )
-    print(f"  uv run python main.py {character} --stage youtube-commit")
+    print("  uv run python main.py <character> --stage youtube-commit")
 
 
 def stage_youtube_ingest(
-    character: str,
     url: str,
     whisper_model: str,
     min_duration: float,
@@ -431,10 +426,13 @@ def stage_youtube_ingest(
 
     The steps stay separate stages underneath. The orchestrator starts them one
     job at a time so a failure only costs the step that failed, and this is the
-    same sequence for anyone who would rather type it once. Nothing here touches
-    work/<character>/dataset/ -- see stage_youtube_commit.
+    same sequence for anyone who would rather type it once. No character is
+    needed here: the artifacts land under a video id shared by every
+    character, so a second character claiming this video skips straight to
+    stage_youtube_commit instead of repeating any of this. Nothing here
+    touches work/<character>/dataset/ -- see stage_youtube_commit.
     """
-    video_dir = video_dir_for(character, url)
+    video_dir = video_dir_for(url)
     review_path = video_dir / REVIEW_CSV_NAME
     if review_path.exists():
         print(f"{url} already ingested, review at {review_path}")
@@ -444,22 +442,21 @@ def stage_youtube_ingest(
     if enable_diarization:
         resolve_hf_token(hf_token)
 
-    stage_youtube_download(character, url)
-    stage_youtube_transcribe(character, url, whisper_model)
-    stage_youtube_chunk(character, url, min_duration, max_duration)
+    stage_youtube_download(url)
+    stage_youtube_transcribe(url, whisper_model)
+    stage_youtube_chunk(url, min_duration, max_duration)
     if enable_diarization:
-        stage_youtube_diarize(
-            character, url, hf_token, num_speakers, min_speaker_coverage
-        )
-    stage_youtube_review(character, url, quality_flag_threshold)
+        stage_youtube_diarize(url, hf_token, num_speakers, min_speaker_coverage)
+    stage_youtube_review(url, quality_flag_threshold)
 
 
 def stage_youtube_commit(character: str) -> None:
-    youtube_dir = APP_DIR / "work" / character / "youtube"
+    # shared across every character now, so this scans every ingested video --
+    # not just ones this character happened to ingest -- and speaker_map.json
+    # decides which of them actually route clips here (see review.py)
+    youtube_dir = APP_DIR / "work" / "youtube"
     if not youtube_dir.exists():
-        raise SystemExit(
-            f"No ingested YouTube videos found for {character} under {youtube_dir}"
-        )
+        raise SystemExit(f"No ingested YouTube videos found under {youtube_dir}")
     out_dir = dataset_dir_for(character)
     result = commit_reviewed_clips(youtube_dir, out_dir, dataset_dir_for)
 
@@ -656,7 +653,10 @@ def main() -> None:
         "character",
         nargs="?",
         help="Character name, matching samples/<character>/. Optional for "
-        "--stage youtube-search, which searches YouTube and writes nothing.",
+        "--stage youtube-search, which searches YouTube and writes nothing, "
+        "and for --stage youtube-ingest and its five sub-stages "
+        "(youtube-download/transcribe/chunk/diarize/review), which act on a "
+        "video shared across every character.",
     )
     parser.add_argument("--corpus-size", type=int, default=CORPUS_SIZE_DEFAULT)
     parser.add_argument("--stage", choices=STAGES, default="all")
@@ -763,7 +763,13 @@ def main() -> None:
         parser.error(f"--stage {args.stage} requires --youtube-url")
     if args.stage == "youtube-search" and not args.search_query:
         parser.error("--stage youtube-search requires --search-query")
-    if args.stage != "youtube-search" and not args.character:
+    # youtube-ingest and its five steps act on a video shared across every
+    # character, so none of them need one -- only youtube-commit and the
+    # character-only stages below do.
+    if (
+        args.stage not in ("youtube-search", *YOUTUBE_STAGES_NEEDING_URL)
+        and not args.character
+    ):
         parser.error(f"--stage {args.stage} requires a character")
 
     if args.stage in ("all", "dataset"):
@@ -774,7 +780,6 @@ def main() -> None:
         stage_youtube_search(args.search_query, args.search_limit)
     if args.stage == "youtube-ingest":
         stage_youtube_ingest(
-            args.character,
             args.youtube_url,
             args.whisper_model,
             args.min_clip_duration,
@@ -786,28 +791,24 @@ def main() -> None:
             args.min_speaker_coverage,
         )
     if args.stage == "youtube-download":
-        stage_youtube_download(args.character, args.youtube_url)
+        stage_youtube_download(args.youtube_url)
     if args.stage == "youtube-transcribe":
-        stage_youtube_transcribe(args.character, args.youtube_url, args.whisper_model)
+        stage_youtube_transcribe(args.youtube_url, args.whisper_model)
     if args.stage == "youtube-chunk":
         stage_youtube_chunk(
-            args.character,
             args.youtube_url,
             args.min_clip_duration,
             args.max_clip_duration,
         )
     if args.stage == "youtube-diarize":
         stage_youtube_diarize(
-            args.character,
             args.youtube_url,
             args.hf_token,
             args.num_speakers,
             args.min_speaker_coverage,
         )
     if args.stage == "youtube-review":
-        stage_youtube_review(
-            args.character, args.youtube_url, args.quality_flag_threshold
-        )
+        stage_youtube_review(args.youtube_url, args.quality_flag_threshold)
     if args.stage == "youtube-commit":
         stage_youtube_commit(args.character)
     if args.stage in ("all", "resample"):
