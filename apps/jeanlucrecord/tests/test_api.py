@@ -233,6 +233,92 @@ def test_put_speaker_map_rejects_reassigning_an_already_mapped_speaker(
     }
 
 
+def test_post_videos_commit_routes_two_videos_to_two_characters(client, work_dir):
+    """FR14: one call, two ingested videos, three characters between them."""
+    build_video(
+        work_dir,
+        "vid1",
+        [
+            row("clip_0001", speaker_label="SPEAKER_00"),
+            row("clip_0002", speaker_label="SPEAKER_01"),
+        ],
+    )
+    build_video(work_dir, "vid2", [row("clip_0001", speaker_label="SPEAKER_00")])
+
+    response = client.post(
+        "/videos/commit",
+        json={
+            "assignments": {
+                "vid1": {"SPEAKER_00": "janeway", "SPEAKER_01": "chakotay"},
+                "vid2": {"SPEAKER_00": "tuvok"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"committed": {"chakotay": 1, "janeway": 1, "tuvok": 1}}
+    assert (
+        work_dir / "youtube" / "vid1" / "speaker_map.json"
+    ).exists() and (work_dir / "youtube" / "vid2" / "speaker_map.json").exists()
+
+
+def test_post_videos_commit_rejects_a_conflicting_speaker_map_entry(client, work_dir):
+    build_video(work_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")])
+    client.put(
+        "/videos/vid1/speaker-map", json={"speaker_map": {"SPEAKER_00": "janeway"}}
+    )
+
+    response = client.post(
+        "/videos/commit",
+        json={"assignments": {"vid1": {"SPEAKER_00": "chakotay"}}},
+    )
+
+    assert response.status_code == 409
+    # the whole payload is rejected, and nothing committed
+    assert not (work_dir / "youtube" / "vid1" / "committed.csv").exists()
+    assert client.get("/videos/vid1/clips").json()["speaker_map"] == {
+        "SPEAKER_00": "janeway"
+    }
+
+
+def test_post_videos_commit_leaves_no_video_written_when_one_conflicts(
+    client, work_dir
+):
+    """A conflict on one video in the payload must not half-apply the rest."""
+    build_video(work_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")])
+    build_video(work_dir, "vid2", [row("clip_0001", speaker_label="SPEAKER_00")])
+    client.put(
+        "/videos/vid1/speaker-map", json={"speaker_map": {"SPEAKER_00": "janeway"}}
+    )
+
+    response = client.post(
+        "/videos/commit",
+        json={
+            "assignments": {
+                "vid1": {"SPEAKER_00": "chakotay"},
+                "vid2": {"SPEAKER_00": "tuvok"},
+            }
+        },
+    )
+
+    assert response.status_code == 409
+    assert client.get("/videos/vid2/clips").json()["speaker_map"] == {}
+
+
+def test_post_videos_commit_404s_for_an_unknown_video(client, work_dir):
+    build_video(work_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")])
+
+    response = client.post(
+        "/videos/commit",
+        json={"assignments": {"nope": {"SPEAKER_00": "janeway"}}},
+    )
+
+    assert response.status_code == 404
+    # vid1 was never named in the payload, but this also proves nothing at
+    # all was written before the unknown video was rejected
+    assert client.get("/videos/vid1/clips").json()["speaker_map"] == {}
+
+
 def test_get_clip_audio_streams_the_shared_clip(client, work_dir):
     build_video(work_dir, "vid1", [row("clip_0001")])
 

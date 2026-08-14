@@ -65,7 +65,7 @@ def load_committed(path: Path) -> dict[str, str]:
 
 def commit_reviewed_clips(
     youtube_dir: Path,
-    out_dir: Path,
+    out_dir: Path | None = None,
     dataset_dir_for: Callable[[str], Path] | None = None,
 ) -> CommitResult:
     """Merge keep=1 rows from every work/<character>/youtube/<video_id>/review.csv
@@ -77,13 +77,20 @@ def commit_reviewed_clips(
     video can seed several characters at once. None sends every clip to out_dir,
     which is the behaviour from before diarization existed.
 
+    out_dir is the fallback destination for a clip with no single mapped
+    character: an unmapped video (dataset_dir_for is None), an undiarized row,
+    or a speaker absent from its video's map. Pass None to skip those clips
+    instead of guessing -- the batched, multi-character commit route has no
+    one "committing character" to fall back to, so a guess there would risk
+    routing a clip to the wrong dataset.
+
     The map is read per video, because SPEAKER_00 in one video is not the same
     person as SPEAKER_00 in the next. A labelled clip whose speaker is absent
     from its video's map stays uncommitted, so a later run with a corrected map
     can still pick it up.
     """
-    wav_dir = out_dir / "wavs"
-    wav_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir is not None:
+        (out_dir / "wavs").mkdir(parents=True, exist_ok=True)
 
     newly_committed = 0
     already_committed = 0
@@ -193,6 +200,35 @@ class SpeakerMapConflict(Exception):
         )
 
 
+def read_speaker_map(video_dir: Path) -> dict[str, str | None]:
+    map_path = video_dir / SPEAKER_MAP_FILENAME
+    if not map_path.exists():
+        return {}
+    return json.loads(map_path.read_text(encoding="utf-8"))
+
+
+def speaker_map_conflicts(
+    existing: dict[str, str | None], speaker_map: dict[str, str | None]
+) -> list[str]:
+    """Speaker labels merging speaker_map into an already-loaded existing map
+    would raise on, without writing anything.
+
+    Pure, no I/O: takes the existing map a caller already read, rather than
+    reading it again itself. That is what lets a caller which must write
+    several videos' maps in one request -- the batched multi-character commit
+    route -- check every video for a conflict, and then write it, off the
+    same single read, instead of two reads that could see a different file if
+    something else writes to it in between.
+    """
+    return sorted(
+        speaker_label
+        for speaker_label, current in existing.items()
+        if current is not None
+        and speaker_label in speaker_map
+        and speaker_map[speaker_label] != current
+    )
+
+
 def write_speaker_map(video_dir: Path, speaker_map: dict[str, str | None]) -> Path:
     """Merge speaker_map into video_dir/speaker_map.json, not replace it.
 
@@ -208,16 +244,8 @@ def write_speaker_map(video_dir: Path, speaker_map: dict[str, str | None]) -> Pa
     """
     map_path = video_dir / SPEAKER_MAP_FILENAME
     map_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = (
-        json.loads(map_path.read_text(encoding="utf-8")) if map_path.exists() else {}
-    )
-    conflicts = sorted(
-        speaker_label
-        for speaker_label, current in existing.items()
-        if current is not None
-        and speaker_label in speaker_map
-        and speaker_map[speaker_label] != current
-    )
+    existing = read_speaker_map(video_dir)
+    conflicts = speaker_map_conflicts(existing, speaker_map)
     if conflicts:
         raise SpeakerMapConflict(conflicts)
     merged = {**existing, **speaker_map}
@@ -227,7 +255,7 @@ def write_speaker_map(video_dir: Path, speaker_map: dict[str, str | None]) -> Pa
 
 def _resolve_target(
     row: dict,
-    out_dir: Path,
+    out_dir: Path | None,
     speaker_targets: dict[str, Path] | None,
 ) -> Path | None:
     # None means no map at all -- the pre-diarization behaviour, send
@@ -236,11 +264,16 @@ def _resolve_target(
     # null), so falling back to out_dir here would be the same unsafe
     # "assume it's mine" guess this story removes from the video-level scan
     # above, just one row at a time instead of one video at a time.
+    #
+    # Either way, out_dir itself may now be None: the batched, multi-character
+    # commit route has no single "committing character" to fall back to, so it
+    # passes None here on purpose. Returning None is exactly what the caller
+    # already treats as "leave this row uncommitted".
     if speaker_targets is None:
         return out_dir
     speaker_label = row.get("speaker_label")
     if not speaker_label:
         # an undiarized row in an otherwise mapped video -- the primary
-        # character is the only sensible destination
+        # character is the only sensible destination, when there is one
         return out_dir
     return speaker_targets.get(speaker_label)
