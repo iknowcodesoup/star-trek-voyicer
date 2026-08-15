@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -488,11 +490,94 @@ def stage_resample(character: str) -> None:
     resample_dir(dataset_dir / "wavs", resampled_dir / "wavs")
 
 
+DATASET_FINGERPRINT_NAME = "dataset-fingerprint.json"
+
+
+def _metadata_fingerprint(directory: Path) -> dict:
+    """Clip count plus a content hash of directory/metadata.csv.
+
+    This is the comparison basis stage_preprocess uses to decide whether
+    piper_train.preprocess needs to rerun: cheap to compute, and it changes
+    exactly when the rows or text in metadata.csv change.
+    """
+    metadata_path = directory / "metadata.csv"
+    if not metadata_path.exists():
+        raise SystemExit(
+            f"No metadata.csv found at {metadata_path}. Run --stage resample first."
+        )
+    try:
+        content = metadata_path.read_bytes()
+        clip_count = len(content.decode("utf-8").splitlines())
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError) as error:
+        # FileNotFoundError here means a TOCTOU race (deleted between the
+        # exists() check above and this read); UnicodeDecodeError means the
+        # file isn't the text file this stage expects -- both are "bad input
+        # file" conditions, same clean SystemExit as the missing-file case
+        # above rather than a raw traceback
+        raise SystemExit(
+            f"Can't read {metadata_path} ({error}). Run --stage resample first."
+        ) from error
+    return {
+        "clip_count": clip_count,
+        "metadata_hash": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _load_sidecar(training_dir: Path) -> dict | None:
+    """The fingerprint stage_preprocess recorded after its last successful run.
+
+    Missing entirely, or corrupt (an interrupted write from a crash, a full
+    disk, a kill mid-write) -- both read back as "no sidecar", so a damaged
+    file makes stage_preprocess regenerate instead of raising.
+    """
+    sidecar_path = training_dir / DATASET_FINGERPRINT_NAME
+    if not sidecar_path.exists():
+        return None
+    try:
+        return json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # JSONDecodeError: valid text, broken JSON. UnicodeDecodeError: a
+        # truncated write can leave invalid UTF-8 bytes. OSError: the file
+        # vanished (or turned unreadable) between the exists() check above
+        # and this read. All three are "corrupt sidecar", same as missing.
+        return None
+
+
+def _write_sidecar(training_dir: Path, fingerprint: dict) -> None:
+    # write-then-replace instead of writing sidecar_path directly: Path.replace
+    # is an atomic rename on both POSIX and Windows, so a crash, full disk, or
+    # kill mid-write leaves either the old sidecar or the new one -- never a
+    # truncated file in between for _load_sidecar to have to guard against.
+    sidecar_path = training_dir / DATASET_FINGERPRINT_NAME
+    tmp_path = sidecar_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(fingerprint), encoding="utf-8")
+    tmp_path.replace(sidecar_path)
+
+
 def stage_preprocess(character: str) -> None:
+    # fingerprints work/<character>/resampled/, not dataset/ -- resample and
+    # preprocess are independently runnable stages (STAGES above), and
+    # resampled/metadata.csv is what piper_train.preprocess actually reads
+    # (--input-dir below). Fingerprinting dataset/ would regenerate against
+    # stale resampled audio whenever dataset/ changed but --stage resample
+    # hadn't caught it up yet.
     training_dir = APP_DIR / "work" / character / "training"
-    if (training_dir / "config.json").exists():
+    resampled_dir = APP_DIR / "work" / character / "resampled"
+    fingerprint = _metadata_fingerprint(resampled_dir)
+
+    config_exists = (training_dir / "config.json").exists()
+    sidecar = _load_sidecar(training_dir)
+    if config_exists and sidecar == fingerprint:
         print(f"Preprocessed training data already exists at {training_dir}, skipping.")
         return
+
+    if not config_exists:
+        reason = f"{training_dir / 'config.json'} is missing"
+    elif sidecar is None:
+        reason = "no fingerprint sidecar was recorded yet"
+    else:
+        reason = "the dataset fingerprint changed since the last preprocess run"
+    print(f"Regenerating preprocessed training data at {training_dir} ({reason}).")
     run_docker(
         "python3",
         "-m",
@@ -509,6 +594,9 @@ def stage_preprocess(character: str) -> None:
         "--sample-rate",
         "22050",
     )
+    # written only after run_docker succeeds -- an interrupted or failed
+    # preprocess run must be retried next time, not mistaken for up to date
+    _write_sidecar(training_dir, fingerprint)
 
 
 def stage_smoketest() -> None:
