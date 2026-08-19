@@ -16,10 +16,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import api
+import fs_paths
+from models import JobRequest
 from review import write_review_csv, write_speaker_map
+from services.job_runner import _build_command
 from youtube_ingest import DIARIZATION_NAME
 
 
@@ -50,7 +54,7 @@ def build_video(work_dir: Path, video_id: str, rows: list[dict]) -> Path:
 
 @pytest.fixture
 def work_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "WORK_DIR", tmp_path)
+    monkeypatch.setattr(fs_paths, "WORK_DIR", tmp_path)
     return tmp_path
 
 
@@ -415,8 +419,8 @@ def test_build_command_needs_no_character_for_youtube_ingest_stages():
     Calls _build_command directly rather than POST /jobs, which would spawn a
     real main.py subprocess -- this is a pure function, no process needed.
     """
-    command = api._build_command(
-        api.JobRequest(stage="youtube-download", youtube_url="https://example.com/v")
+    command = _build_command(
+        JobRequest(stage="youtube-download", youtube_url="https://example.com/v")
     )
 
     assert "--stage" in command
@@ -424,7 +428,7 @@ def test_build_command_needs_no_character_for_youtube_ingest_stages():
 
 
 def test_build_command_still_needs_a_character_for_youtube_commit():
-    with pytest.raises(api.HTTPException) as exc_info:
-        api._build_command(api.JobRequest(stage="youtube-commit"))
+    with pytest.raises(HTTPException) as exc_info:
+        _build_command(JobRequest(stage="youtube-commit"))
 
     assert exc_info.value.status_code == 422
