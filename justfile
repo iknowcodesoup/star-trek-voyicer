@@ -23,12 +23,12 @@ run-janewav:
     unset VIRTUAL_ENV && cd apps/janewav && uv run python main.py
 
 run-jeanlucrecord:
-    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run python main.py
+    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run jeanlucrecord
 
 # Serve the HTTP control surface so an orchestrator can drive the pipeline.
-# Binds to localhost only. main.py stays the definition of every stage.
+# Binds to localhost only. cli.py stays the definition of every stage.
 serve-jeanlucrecord port="8100":
-    unset VIRTUAL_ENV && uv run --directory apps/jeanlucrecord python -m uvicorn api:app --host 127.0.0.1 --port {{port}}
+    unset VIRTUAL_ENV && uv run --directory apps/jeanlucrecord python -m uvicorn jeanlucrecord.app:app --host 127.0.0.1 --port {{port}}
 
 # Run the jeanlucrecord unit tests
 test-jeanlucrecord:
@@ -36,7 +36,7 @@ test-jeanlucrecord:
 
 # Search YouTube for candidate source videos. No character needed, writes nothing.
 search-youtube query limit="10":
-    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run python main.py --stage youtube-search --search-query "{{query}}" --search-limit {{limit}}
+    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run jeanlucrecord --stage youtube-search --search-query "{{query}}" --search-limit {{limit}}
 
 # Generate a fine-tuned Piper voice model for a character.
 # stage defaults to the full pipeline; pass one to resume a single step,
@@ -46,4 +46,4 @@ search-youtube query limit="10":
 # `just generate-voice doctor export work/doctor/training/epoch=100.ckpt`
 # omit it to export the most recently modified checkpoint.
 generate-voice character stage="all" checkpoint="":
-    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run python main.py {{character}} --stage {{stage}} $(if [ -n "{{checkpoint}}" ]; then echo "--checkpoint {{checkpoint}}"; fi)
+    unset VIRTUAL_ENV && cd apps/jeanlucrecord && uv run jeanlucrecord {{character}} --stage {{stage}} $(if [ -n "{{checkpoint}}" ]; then echo "--checkpoint {{checkpoint}}"; fi)

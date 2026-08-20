@@ -1,5 +1,9 @@
 # GPU Utilization & Training Throughput Spec
 
+> **Note:** written against the old flat `main.py`, before the `src/jeanlucrecord/`
+> package migration. Every `main.py:N` reference below is now `src/jeanlucrecord/cli.py`,
+> and the line numbers are approximate -- the file moved and its imports changed.
+
 ## Background / diagnosis
 
 Symptoms observed during the `train` stage:
