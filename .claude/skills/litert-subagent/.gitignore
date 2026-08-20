@@ -1,0 +1,7 @@
+# Ignore local LiteRT model binaries
+*.litertlm
+*.tflite
+
+# Ignore Python cache if the agent executes scripts directly
+__pycache__/
+*.pyc
