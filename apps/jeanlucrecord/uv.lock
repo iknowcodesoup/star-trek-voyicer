@@ -893,7 +893,7 @@ wheels = [
 [[package]]
 name = "jeanlucrecord"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "chatterbox-tts" },
     { name = "fastapi" },

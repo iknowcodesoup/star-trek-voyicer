@@ -25,7 +25,7 @@ Piper is fine-tuned on the resulting dataset from its LJSpeech checkpoint.
 ## Usage
 
 ```
-uv run python main.py <character>
+uv run jeanlucrecord <character>
 ```
 
 Runs the full pipeline: dataset generation, resampling, Piper preprocessing, fine-tuning,
@@ -38,13 +38,13 @@ and for the `smoketest` stage, which should be run once after building the Docke
 before a real training run, to confirm the GPU is usable inside the container:
 
 ```
-uv run python main.py <character> --stage smoketest
+uv run jeanlucrecord <character> --stage smoketest
 ```
 
 `--corpus-size N` overrides the default corpus size (1300) — useful for a quick smoke run:
 
 ```
-uv run python main.py doctor --corpus-size 10 --stage dataset
+uv run jeanlucrecord doctor --corpus-size 10 --stage dataset
 ```
 
 ## Alternative dataset sources
@@ -60,10 +60,10 @@ If you already have clipped, transcribed audio (an `id|text` `metadata.csv` plus
 instead of generating a dataset with Chatterbox:
 
 ```
-uv run python main.py cena --stage import --import-dir samples/cena
-uv run python main.py cena --stage resample
-uv run python main.py cena --stage preprocess
-uv run python main.py cena --stage train
+uv run jeanlucrecord cena --stage import --import-dir samples/cena
+uv run jeanlucrecord cena --stage resample
+uv run jeanlucrecord cena --stage preprocess
+uv run jeanlucrecord cena --stage train
 ```
 
 Metadata rows with no matching wav are logged and dropped, not treated as an error.
@@ -77,7 +77,7 @@ mono, transcribes it, and cuts it into candidate clips at the transcript's sente
 boundaries:
 
 ```
-uv run python main.py picard --stage youtube-ingest --youtube-url https://www.youtube.com/watch?v=XXXXXXXXXXX
+uv run jeanlucrecord picard --stage youtube-ingest --youtube-url https://www.youtube.com/watch?v=XXXXXXXXXXX
 ```
 
 Since a source video may have more than one speaker or background noise, clips are **not**
@@ -90,7 +90,7 @@ committed to the dataset automatically. Instead this writes
 file), then commit the ones you kept:
 
 ```
-uv run python main.py picard --stage youtube-commit
+uv run jeanlucrecord picard --stage youtube-commit
 ```
 
 Ingesting the same URL again is a no-op (existing `review.csv` is left alone). Ingest more
@@ -104,7 +104,7 @@ committed doesn't remove it from `dataset/`; delete its row + wav there by hand 
 nothing:
 
 ```
-uv run python main.py --stage youtube-search --search-query "star trek voyager janeway"
+uv run jeanlucrecord --stage youtube-search --search-query "star trek voyager janeway"
 ```
 
 #### Splitting a video by speaker
@@ -113,7 +113,7 @@ Most real footage has more than one person talking. Add `--diarize` to split the
 speaker before the clips reach `review.csv`:
 
 ```
-uv run python main.py janeway --stage youtube-ingest --diarize \
+uv run jeanlucrecord janeway --stage youtube-ingest --diarize \
   --youtube-url https://www.youtube.com/watch?v=XXXXXXXXXXX
 ```
 
@@ -130,7 +130,7 @@ Pass `--num-speakers N` when you already know how many people speak.
 **Setup.** Diarization runs in its own environment under `diarizer/`, because
 `pyannote.audio` needs `torch>=2.8` and `chatterbox-tts` pins `torch==2.6`. The two never
 run together — one synthesizes a dataset from a text corpus, the other splits real audio —
-so isolating them costs nothing. `src/diarize.py` runs `diarizer/diarize_worker.py` as a
+so isolating them costs nothing. `core/diarization.py` runs `diarizer/diarize_worker.py` as a
 subprocess.
 
 ```
@@ -165,8 +165,8 @@ is the behaviour from before diarization existed.
 
 ## HTTP control surface
 
-`api.py` lets an outside orchestrator drive this pipeline. It runs no stage itself: every
-job spawns `python main.py <character> --stage <stage>` and tails its output, so the
+`app.py` lets an outside orchestrator drive this pipeline. It runs no stage itself: every
+job spawns `jeanlucrecord <character> --stage <stage>` and tails its output, so the
 command line stays the single definition of what each stage does.
 
 ```
@@ -177,17 +177,24 @@ just serve-jeanlucrecord        # http://127.0.0.1:8100
 | --- | --- | --- |
 | `GET` | `/health` | reachability |
 | `GET` | `/search?query=&limit=` | search YouTube |
+| `GET` | `/resolve?url=` | resolve a video URL to its id |
 | `GET` | `/characters` | characters with a `work/` directory |
 | `POST` | `/jobs` | start a stage, returns a `job_id` |
 | `GET` | `/jobs` · `/jobs/{id}` | job state |
 | `GET` | `/jobs/{id}/logs?offset=` | tail a job's output from a byte offset |
 | `DELETE` | `/jobs/{id}` | cancel, and stop the container |
-| `GET` | `/characters/{c}/videos/{v}/clips` | `review.csv` as JSON |
-| `PATCH` | `/characters/{c}/videos/{v}/clips` | set `keep` and `speaker_label` |
-| `PUT` | `/characters/{c}/videos/{v}/speaker-map` | write `speaker_map.json` |
-| `GET` | `/characters/{c}/videos/{v}/clips/{id}/audio` | play one clip |
+| `GET` | `/videos` | every ingested video, independent of any character |
+| `GET` | `/videos/{video_id}/speakers` | speaker labels and clip counts for one video |
+| `GET` | `/videos/{video_id}/clips` | `review.csv` as JSON |
+| `PATCH` | `/videos/{video_id}/clips` | set `keep` and `speaker_label` |
+| `GET` | `/videos/{video_id}/clips/{id}/audio` | play one clip |
+| `PUT` | `/videos/{video_id}/speaker-map` | write `speaker_map.json` for one video |
+| `POST` | `/videos/commit` | write several videos' speaker maps, then commit every kept clip |
 | `GET` | `/characters/{c}/training` | epoch, loss, and checkpoints |
 | `GET` | `/characters/{c}/samples` | checkpoint sample wavs |
+
+None of the `/videos/...` routes take a character: a video is ingested once and shared
+across every character that later claims it (see `speaker_map.json` below).
 
 `POST /jobs` returns at once. It never waits for a stage to finish, because training takes
 days. Poll `/jobs/{id}` and read `/jobs/{id}/logs` for progress.
@@ -202,8 +209,8 @@ comma-separated list to change that.
 just test-jeanlucrecord
 ```
 
-Covers the speaker rejection rule in `src/diarize.py` and the commit routing in
-`src/review.py`. Both are pure functions, so the tests need no audio and no GPU.
+Covers the speaker rejection rule in `core/diarization.py` and the commit routing in
+`core/review_workflow.py`. Both are pure functions, so the tests need no audio and no GPU.
 
 ## Monitoring
 
@@ -219,11 +226,11 @@ While the `train` stage is running, from another terminal:
 
 The Dockerfile patches piper_train to keep the 10 most recent checkpoints instead of just
 the latest (Lightning's un-patched default silently deletes each older checkpoint as soon
-as the next one saves), spaced 20 epochs apart via `main.py`'s `CHECKPOINT_EPOCHS`. Loss
+as the next one saves), spaced 20 epochs apart via `cli.py`'s `CHECKPOINT_EPOCHS`. Loss
 alone isn't a reliable way to pick a winner among them — compare by ear instead:
 
 ```
-uv run python main.py <character> --stage sample
+uv run jeanlucrecord <character> --stage sample
 ```
 
 Exports every retained checkpoint under `work/<character>/training/**/*.ckpt` to its own
@@ -236,7 +243,7 @@ Listen to the results, then export the checkpoint that actually sounds best rath
 assuming the latest epoch is (`--stage export` alone always picks the most recent by mtime):
 
 ```
-uv run python main.py <character> --stage export --checkpoint work/<character>/training/lightning_logs/version_N/checkpoints/epoch=X-step=Y.ckpt
+uv run jeanlucrecord <character> --stage export --checkpoint work/<character>/training/lightning_logs/version_N/checkpoints/epoch=X-step=Y.ckpt
 ```
 
 ## Output
