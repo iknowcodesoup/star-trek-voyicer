@@ -12,6 +12,12 @@ from pathlib import Path
 
 from fastapi import HTTPException, status
 
+# Four parents up from src/voice_factory/infrastructure/ is the app root
+# (apps/jeanlucrecord/). The nesting depth is load-bearing: move this file and
+# WORK_DIR silently points at a directory that does not exist, which every
+# route here reports as an empty result rather than an error. GET /videos
+# answering {"videos": []} on a machine with ingested videos means this
+# resolved wrong -- check /health, which returns WORK_DIR for that reason.
 APP_DIR = Path(__file__).resolve().parent.parent.parent.parent
 WORK_DIR = APP_DIR / "work"
 JOB_STATE_PATH = WORK_DIR / "_jobs.json"

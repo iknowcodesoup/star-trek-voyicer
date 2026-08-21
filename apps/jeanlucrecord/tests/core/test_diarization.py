@@ -1,4 +1,4 @@
-from jeanlucrecord.core.diarization import assign_speakers, count_by_speaker
+from voice_factory.core.diarization import assign_speakers, count_by_speaker
 
 
 def clip(start: float, end: float, clip_id: str = "clip_0001") -> dict:

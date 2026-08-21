@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 
-from jeanlucrecord.core.job_runner import JobRunner
-from jeanlucrecord.core.training_log_reader import (
+from voice_factory.core.job_runner import JobRunner
+from voice_factory.core.training_log_reader import (
     parse_checkpoint_name,
     parse_training_log,
 )
-from jeanlucrecord.dependencies import get_job_runner
-from jeanlucrecord.infrastructure import filesystem_layout
+from voice_factory.dependencies import get_job_runner
+from voice_factory.infrastructure import filesystem_layout
 
 router = APIRouter(tags=["Training"])
 

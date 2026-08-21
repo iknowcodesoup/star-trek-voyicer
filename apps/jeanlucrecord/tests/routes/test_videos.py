@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from jeanlucrecord.core.youtube_ingest import DIARIZATION_NAME
-from jeanlucrecord.repositories.review_csv_repository import write_review_csv
+from voice_factory.core.youtube_ingest import DIARIZATION_NAME
+from voice_factory.repositories.review_csv_repository import write_review_csv
 
 
 def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:
@@ -225,7 +225,7 @@ def test_a_video_ingested_once_serves_every_character_that_claims_it(client, wor
     """The whole point of the move: no character ever appears in these URLs,
     so the same ingested video answers identically for every character that
     claims it, and nothing here ever re-downloads or re-diarizes it."""
-    from jeanlucrecord.core.review_workflow import write_speaker_map
+    from voice_factory.core.review_workflow import write_speaker_map
 
     build_video(work_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")])
     write_speaker_map(

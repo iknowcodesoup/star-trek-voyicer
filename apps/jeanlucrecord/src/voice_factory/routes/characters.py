@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from jeanlucrecord.infrastructure import filesystem_layout
+from voice_factory.infrastructure import filesystem_layout
 
 router = APIRouter(tags=["Characters"])
 

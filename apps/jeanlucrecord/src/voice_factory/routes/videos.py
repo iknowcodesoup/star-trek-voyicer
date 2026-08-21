@@ -10,12 +10,17 @@ import json
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
 
-from jeanlucrecord.core import clip_review
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.filesystem_layout import check_name
-from jeanlucrecord.repositories.review_csv_repository import read_review_csv, write_review_csv
-from jeanlucrecord.repositories.speaker_map_repository import SPEAKER_MAP_FILENAME
-from jeanlucrecord.schemas import ClipDecisionRequest
+from voice_factory.core import clip_review
+from voice_factory.infrastructure import filesystem_layout
+from voice_factory.infrastructure.filesystem_layout import check_name
+from voice_factory.repositories.review_csv_repository import (
+    read_review_csv,
+    write_review_csv,
+)
+from voice_factory.repositories.speaker_map_repository import (
+    SPEAKER_MAP_FILENAME,
+)
+from voice_factory.schemas import ClipDecisionRequest
 
 router = APIRouter(tags=["Videos"])
 

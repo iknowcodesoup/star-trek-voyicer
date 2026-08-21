@@ -10,11 +10,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# This file lives at src/jeanlucrecord/config.py -- four parents up is the
+# This file lives at src/voice_factory/config.py -- three parents up is the
 # app root (apps/jeanlucrecord/), where work/, samples/, checkpoints/,
 # docker/, and .env all live. PACKAGE_ROOT is the installed package's own
 # directory, one level shallower, for anything that needs to walk relative to
 # the package instead of the app (e.g. cli.py locating docker/*.sh).
+#
+# The nesting depth is load-bearing. Moving this file up or down a directory
+# silently retargets APP_ROOT, and .env then fails to load with no error --
+# the webhook and HF_TOKEN settings just go missing. Keep config.py directly
+# inside the package, and see infrastructure/filesystem_layout.py, which
+# resolves WORK_DIR the same way.
 PACKAGE_ROOT = Path(__file__).resolve().parent
 APP_ROOT = PACKAGE_ROOT.parent.parent
 

@@ -11,15 +11,15 @@ from pathlib import Path
 
 from fastapi import HTTPException, status
 
-from jeanlucrecord.core.training_log_reader import parse_optional_float
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.filesystem_layout import check_name
-from jeanlucrecord.repositories.review_csv_repository import (
+from voice_factory.core.training_log_reader import parse_optional_float
+from voice_factory.infrastructure import filesystem_layout
+from voice_factory.infrastructure.filesystem_layout import check_name
+from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
     REVIEW_FIELDS,
     read_review_csv,
 )
-from jeanlucrecord.schemas import ClipDecision
+from voice_factory.schemas import ClipDecision
 
 
 def video_dir(video_id: str) -> Path:
@@ -52,7 +52,7 @@ def video_summary(video_directory: Path) -> dict:
     # deferred import: youtube_ingest depends on nothing here, but importing
     # it at module scope would make every clip_review caller pay for its
     # subprocess-tooling constants too
-    from jeanlucrecord.core.youtube_ingest import DIARIZATION_NAME
+    from voice_factory.core.youtube_ingest import DIARIZATION_NAME
 
     path = video_directory / REVIEW_CSV_NAME
     clip_count = len(read_review_csv(path)) if path.exists() else 0
