@@ -8,7 +8,7 @@ batch of videos for routes/speaker_map.py's two routes.
 
 from pathlib import Path
 
-from jeanlucrecord.core.review_workflow import (
+from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
     read_speaker_map,
     speaker_map_conflicts,

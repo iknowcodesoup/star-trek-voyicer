@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from jeanlucrecord.repositories.review_csv_repository import write_review_csv
+from voice_factory.repositories.review_csv_repository import write_review_csv
 
 
 def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:

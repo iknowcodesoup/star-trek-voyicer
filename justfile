@@ -28,7 +28,7 @@ run-jeanlucrecord:
 # Serve the HTTP control surface so an orchestrator can drive the pipeline.
 # Binds to localhost only. cli.py stays the definition of every stage.
 serve-jeanlucrecord port="8100":
-    unset VIRTUAL_ENV && uv run --directory apps/jeanlucrecord python -m uvicorn jeanlucrecord.app:app --host 127.0.0.1 --port {{port}}
+    unset VIRTUAL_ENV && uv run --directory apps/jeanlucrecord python -m uvicorn voice_factory.app:app --host 127.0.0.1 --port {{port}}
 
 # Run the jeanlucrecord unit tests
 test-jeanlucrecord:

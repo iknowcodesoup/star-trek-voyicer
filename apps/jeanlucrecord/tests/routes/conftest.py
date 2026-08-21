@@ -11,8 +11,8 @@ touches the real work/ directory these stages write to outside of tests.
 import pytest
 from fastapi.testclient import TestClient
 
-from jeanlucrecord import app as app_module
-from jeanlucrecord.infrastructure import filesystem_layout
+from voice_factory import app as app_module
+from voice_factory.infrastructure import filesystem_layout
 
 
 @pytest.fixture

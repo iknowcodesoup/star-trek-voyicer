@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from jeanlucrecord import cli
+from voice_factory import cli
 
 
 def write_metadata(directory: Path, rows: list[str]) -> Path:

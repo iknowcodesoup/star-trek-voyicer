@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from jeanlucrecord.core.review_workflow import (
+from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
     commit_reviewed_clips,
     write_speaker_map,
 )
-from jeanlucrecord.repositories.review_csv_repository import write_review_csv
+from voice_factory.repositories.review_csv_repository import write_review_csv
 
 
 def build_video(youtube_dir: Path, video_id: str, rows: list[dict]) -> Path:

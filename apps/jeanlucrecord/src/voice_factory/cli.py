@@ -13,20 +13,24 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from jeanlucrecord import config
-from jeanlucrecord.core.corpus import load_corpus, load_validation_sentences
-from jeanlucrecord.core.diarization import (
+from voice_factory import config
+from voice_factory.core.corpus import load_corpus, load_validation_sentences
+from voice_factory.core.diarization import (
     MIN_SPEAKER_COVERAGE,
     assign_speakers,
     count_by_speaker,
     diarize,
 )
-from jeanlucrecord.core.generate_dataset import generate_dataset
-from jeanlucrecord.core.import_dataset import import_dataset
-from jeanlucrecord.core.quality import FLAG_THRESHOLD_DB, clip_quality_score, is_flagged
-from jeanlucrecord.core.resample import normalize_ref_wav, resample_dir
-from jeanlucrecord.core.review_workflow import commit_reviewed_clips
-from jeanlucrecord.core.youtube_ingest import (
+from voice_factory.core.generate_dataset import generate_dataset
+from voice_factory.core.import_dataset import import_dataset
+from voice_factory.core.quality import (
+    FLAG_THRESHOLD_DB,
+    clip_quality_score,
+    is_flagged,
+)
+from voice_factory.core.resample import normalize_ref_wav, resample_dir
+from voice_factory.core.review_workflow import commit_reviewed_clips
+from voice_factory.core.youtube_ingest import (
     CLIPS_DIR_NAME,
     CLIPS_NAME,
     DIARIZATION_NAME,
@@ -39,13 +43,21 @@ from jeanlucrecord.core.youtube_ingest import (
     transcribe,
     write_json,
 )
-from jeanlucrecord.core.youtube_search import SEARCH_LIMIT_DEFAULT, search_videos
-from jeanlucrecord.repositories.review_csv_repository import (
+from voice_factory.core.youtube_search import (
+    SEARCH_LIMIT_DEFAULT,
+    search_videos,
+)
+from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
     write_review_csv,
 )
-from jeanlucrecord.repositories.speaker_map_repository import SPEAKER_MAP_FILENAME
-from jeanlucrecord.schemas import YOUTUBE_INGEST_STEPS, YOUTUBE_STAGES_NEEDING_URL
+from voice_factory.repositories.speaker_map_repository import (
+    SPEAKER_MAP_FILENAME,
+)
+from voice_factory.schemas import (
+    YOUTUBE_INGEST_STEPS,
+    YOUTUBE_STAGES_NEEDING_URL,
+)
 
 # APP_DIR is the app root (apps/jeanlucrecord/), where work/, samples/,
 # checkpoints/, and docker/ all live -- not this module's own package
@@ -103,6 +115,7 @@ STAGES = [
     "youtube-review",
     "youtube-commit",
 ]
+
 
 def dataset_dir_for(character: str) -> Path:
     return APP_DIR / "work" / character / "dataset"
