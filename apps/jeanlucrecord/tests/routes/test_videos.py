@@ -61,6 +61,63 @@ def test_get_clips_404s_for_an_unknown_video(client, work_dir):
     assert response.status_code == 404
 
 
+def test_patch_video_renames_it_and_returns_the_video(client, work_dir):
+    build_video(
+        work_dir,
+        "vid1",
+        [row("clip_0001")],
+        meta={"title": "Auto title", "channel": "Voyager", "url": "http://y/vid1"},
+    )
+
+    response = client.patch("/videos/vid1", json={"title": "Corrected by hand"})
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Corrected by hand"
+    assert client.get("/videos").json()["videos"][0]["title"] == "Corrected by hand"
+
+
+def test_patch_video_keeps_the_fields_it_was_not_given(client, work_dir):
+    """A rename merges over meta.json. url, channel and ingested_at are
+    yt-dlp's answers and dropping them would cost a re-ingest to recover."""
+    build_video(
+        work_dir,
+        "vid1",
+        [row("clip_0001")],
+        meta={"title": "Auto", "channel": "Voyager", "url": "http://y/vid1"},
+    )
+
+    client.patch("/videos/vid1", json={"title": "Renamed"})
+
+    video = client.get("/videos").json()["videos"][0]
+    assert video["channel"] == "Voyager"
+    assert video["url"] == "http://y/vid1"
+
+
+def test_patch_video_names_a_video_that_had_no_meta(client, work_dir):
+    """video_summary falls back to the id when meta.json is absent, so a
+    rename is also how an old video gets a name for the first time."""
+    build_video(work_dir, "vid1", [row("clip_0001")])
+
+    response = client.patch("/videos/vid1", json={"title": "Named at last"})
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Named at last"
+
+
+def test_patch_video_reports_404_for_an_unknown_video(client, work_dir):
+    response = client.patch("/videos/vid_missing", json={"title": "Nope"})
+
+    assert response.status_code == 404
+
+
+def test_patch_video_rejects_a_blank_title(client, work_dir):
+    """A blank name would hide the video in every list."""
+    build_video(work_dir, "vid1", [row("clip_0001")])
+
+    assert client.patch("/videos/vid1", json={"title": "   "}).status_code == 422
+    assert client.patch("/videos/vid1", json={"title": ""}).status_code == 422
+
+
 def test_patch_clips_writes_through_to_review_csv(client, work_dir):
     build_video(work_dir, "vid1", [row("clip_0001")])
 
@@ -70,7 +127,11 @@ def test_patch_clips_writes_through_to_review_csv(client, work_dir):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"updated": 1}
+    body = response.json()
+    assert body["updated"] == 1
+    # the new state comes back with the write, so a caller never has to ask
+    assert body["clips"][0]["clip_id"] == "clip_0001"
+    assert body["clips"][0]["keep"] is False
     clips = client.get("/videos/vid1/clips").json()["clips"]
     assert clips[0]["keep"] is False
 
