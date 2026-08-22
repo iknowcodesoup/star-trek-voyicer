@@ -22,6 +22,19 @@ def work_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def missing_work_dir(tmp_path, monkeypatch):
+    """A WORK_DIR that is not there, which is a broken deployment.
+
+    tmp_path always exists, so the fault this fixture reproduces -- the one
+    that made GET /videos answer 200 with an empty list on 2026-08-20 -- needs
+    a path one level below it that nothing creates.
+    """
+    absent = tmp_path / "nope"
+    monkeypatch.setattr(filesystem_layout, "WORK_DIR", absent)
+    return absent
+
+
+@pytest.fixture
 def client():
     with TestClient(app_module.app) as test_client:
         yield test_client

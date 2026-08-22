@@ -4,6 +4,7 @@ from pathlib import Path
 
 from voice_factory.core.youtube_ingest import DIARIZATION_NAME
 from voice_factory.repositories.review_csv_repository import write_review_csv
+from voice_factory.repositories.video_meta_repository import write_video_meta_file
 
 
 def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:
@@ -21,13 +22,19 @@ def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:
     }
 
 
-def build_video(work_dir: Path, video_id: str, rows: list[dict]) -> Path:
+def build_video(
+    work_dir: Path, video_id: str, rows: list[dict], meta: dict | None = None
+) -> Path:
+    """One ingested video. meta stays optional, because a video ingested
+    before meta.json existed must keep working with no backfill."""
     video_dir = work_dir / "youtube" / video_id
     clips_dir = video_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     for clip_row in rows:
         (clips_dir / f"{clip_row['clip_id']}.wav").write_bytes(b"RIFF-not-real-audio")
     write_review_csv(video_dir / "review.csv", rows)
+    if meta is not None:
+        write_video_meta_file(video_dir, meta)
     return video_dir
 
 
@@ -174,6 +181,17 @@ def test_list_videos_reports_diarization_and_review_status(client, work_dir):
 
     assert response.status_code == 200
     videos = {video["video_id"]: video for video in response.json()["videos"]}
+    assert set(videos["vid1"]) == {
+        "video_id",
+        "diarized",
+        "reviewed",
+        "clip_count",
+        "title",
+        "url",
+        "duration_sec",
+        "channel",
+        "ingested_at",
+    }
     assert videos["vid1"]["diarized"] is True
     assert videos["vid1"]["reviewed"] is True
     assert videos["vid1"]["clip_count"] == 2
@@ -182,11 +200,77 @@ def test_list_videos_reports_diarization_and_review_status(client, work_dir):
     assert videos["vid2"]["clip_count"] == 0
 
 
+def test_list_videos_names_a_video_from_its_meta_json(client, work_dir):
+    """The factory owns the title, so every character that claims this video
+    reads the same name from the same file."""
+    build_video(
+        work_dir,
+        "vid1",
+        [row("clip_0001")],
+        meta={
+            "video_id": "vid1",
+            "title": "The Best of Both Worlds",
+            "url": "https://www.youtube.com/watch?v=vid1",
+            "duration_sec": 2730.0,
+            "channel": "Star Trek",
+            "ingested_at": "2026-08-12T19:42:00+00:00",
+        },
+    )
+
+    video = client.get("/videos").json()["videos"][0]
+
+    assert video["title"] == "The Best of Both Worlds"
+    assert video["url"] == "https://www.youtube.com/watch?v=vid1"
+    assert video["duration_sec"] == 2730.0
+    assert video["channel"] == "Star Trek"
+    assert video["ingested_at"] == "2026-08-12T19:42:00+00:00"
+
+
+def test_list_videos_falls_back_to_the_video_id_without_meta_json(client, work_dir):
+    """A video ingested before meta.json existed must keep working, so an
+    absent file gives null fields and the id stands in for the title."""
+    build_video(work_dir, "vid1", [row("clip_0001")])
+
+    video = client.get("/videos").json()["videos"][0]
+
+    assert video["title"] == "vid1"
+    assert video["url"] is None
+    assert video["duration_sec"] is None
+    assert video["channel"] is None
+    assert video["ingested_at"] is None
+
+
 def test_list_videos_is_empty_before_anything_is_ingested(client, work_dir):
+    """A WORK_DIR with no youtube/ under it is a fresh install, not a fault.
+    Contrast with the missing-WORK_DIR test below."""
     response = client.get("/videos")
 
     assert response.status_code == 200
     assert response.json() == {"videos": []}
+
+
+def test_list_videos_500s_when_work_dir_is_missing(client, missing_work_dir):
+    """The 2026-08-20 outage: a bad WORK_DIR answered 200 with an empty list,
+    and the dashboard rendered its own stale copy over the top of it."""
+    response = client.get("/videos")
+
+    assert response.status_code == 500
+    assert str(missing_work_dir) in response.json()["detail"]
+
+
+def test_get_characters_500s_when_work_dir_is_missing(client, missing_work_dir):
+    response = client.get("/characters")
+
+    assert response.status_code == 500
+    assert str(missing_work_dir) in response.json()["detail"]
+
+
+def test_health_still_answers_when_work_dir_is_missing(client, missing_work_dir):
+    """The route that reports WORK_DIR is the one that must not raise, or
+    there is no way to see what the path resolved to."""
+    response = client.get("/health")
+
+    assert response.status_code == 200
 
 
 def test_get_video_speakers_groups_by_label_and_counts_clips(client, work_dir):

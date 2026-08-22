@@ -86,6 +86,12 @@ class ClipDecisionRequest(BaseModel):
     decisions: list[ClipDecision] = Field(min_length=1)
 
 
+class VideoRenameRequest(BaseModel):
+    # A blank title would hide the video in every list, and video_summary
+    # already falls back to the id when meta.json carries no title at all.
+    title: str = Field(min_length=1, max_length=300)
+
+
 class SpeakerMapRequest(BaseModel):
     # speaker label -> character name. null discards that speaker's clips.
     speaker_map: dict[str, str | None]
