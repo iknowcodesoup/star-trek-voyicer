@@ -19,6 +19,7 @@ from voice_factory.repositories.review_csv_repository import (
     REVIEW_FIELDS,
     read_review_csv,
 )
+from voice_factory.repositories.video_meta_repository import read_video_meta
 from voice_factory.schemas import ClipDecision
 
 
@@ -56,11 +57,20 @@ def video_summary(video_directory: Path) -> dict:
 
     path = video_directory / REVIEW_CSV_NAME
     clip_count = len(read_review_csv(path)) if path.exists() else 0
+    video_id = video_directory.name
+    # a video ingested before meta.json existed has no title, and must keep
+    # working with no backfill -- the id is the name until someone re-ingests
+    meta = read_video_meta(video_directory)
     return {
-        "video_id": video_directory.name,
+        "video_id": video_id,
         "diarized": (video_directory / DIARIZATION_NAME).exists(),
         "reviewed": path.exists(),
         "clip_count": clip_count,
+        "title": meta.get("title") or video_id,
+        "url": meta.get("url"),
+        "duration_sec": meta.get("duration_sec"),
+        "channel": meta.get("channel"),
+        "ingested_at": meta.get("ingested_at"),
     }
 
 
