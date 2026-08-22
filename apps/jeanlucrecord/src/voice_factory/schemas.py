@@ -4,9 +4,9 @@ Shared by every route, so it stays dependency-free -- nothing here reaches
 into infrastructure, core, or a specific route module.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 JobState = Literal["running", "succeeded", "failed", "cancelled"]
 
@@ -87,9 +87,13 @@ class ClipDecisionRequest(BaseModel):
 
 
 class VideoRenameRequest(BaseModel):
-    # A blank title would hide the video in every list, and video_summary
-    # already falls back to the id when meta.json carries no title at all.
-    title: str = Field(min_length=1, max_length=300)
+    # Stripped before it is measured, so a title of spaces is rejected rather
+    # than stored. A blank name would hide the video in every list, and
+    # video_summary already falls back to the id when there is no title.
+    title: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=300),
+    ]
 
 
 class SpeakerMapRequest(BaseModel):

@@ -175,7 +175,17 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
     write_review_csv(
         review_path, [clip_review.fill_missing_fields(row) for row in rows]
     )
-    return {"updated": len(decisions_request.decisions)}
+    # The clips as they now stand, not just how many changed: a caller that
+    # edited them needs the new state, and a count makes it go and ask again
+    # for what this call already knows.
+    return {
+        "video_id": video_id,
+        "updated": len(decisions_request.decisions),
+        "clips": [
+            clip_review.clip_from_row(by_clip_id[decision.clip_id])
+            for decision in decisions_request.decisions
+        ],
+    }
 
 
 @router.get("/videos/{video_id}/clips/{clip_id}/audio")
