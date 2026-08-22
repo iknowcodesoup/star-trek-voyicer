@@ -6,7 +6,7 @@ in-memory state and the rules for what gets kept.
 import json
 from pathlib import Path
 
-from jeanlucrecord.schemas import Job
+from voice_factory.schemas import Job
 
 # how many of the most recent jobs to keep on disk -- JobRunner passes this
 # through so the retention rule stays visible at the call site

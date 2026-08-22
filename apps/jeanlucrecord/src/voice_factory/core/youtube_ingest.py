@@ -2,7 +2,14 @@ import json
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
+
+from voice_factory.repositories.video_meta_repository import (
+    META_FILENAME,
+    read_video_meta,
+    write_video_meta_file,
+)
 
 TARGET_RATE = 22050
 
@@ -14,6 +21,7 @@ TRANSCRIPT_NAME = "transcript.json"
 CLIPS_NAME = "clips.json"
 CLIPS_DIR_NAME = "clips"
 DIARIZATION_NAME = "diarization.json"
+META_NAME = META_FILENAME
 
 
 def read_json(path: Path) -> list[dict]:
@@ -39,17 +47,70 @@ def cache_is_current(cache_path: Path, source_path: Path) -> bool:
     return cache_path.stat().st_mtime >= source_path.stat().st_mtime
 
 
+def resolve_video_meta(url: str) -> dict:
+    """What yt-dlp already knows about a video, in the shape meta.json stores.
+
+    resolve_video_id pays for a metadata request and keeps one field of the
+    answer. The title, duration, and channel come back in the same response,
+    and they are the fields a dashboard needs to name the video. The field
+    names match youtube_search.search_videos, so a searched video and an
+    ingested one describe themselves the same way.
+    """
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "yt_dlp", "--skip-download",
+            "--print", "%(.{id,title,duration,channel,uploader,webpage_url})j",
+            url,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    try:
+        entry = json.loads(line) if line else {}
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"yt-dlp returned no video metadata for {url}") from error
+
+    video_id = entry.get("id")
+    if not video_id:
+        raise RuntimeError(f"yt-dlp returned no video id for {url}")
+    return {
+        "video_id": video_id,
+        "title": entry.get("title") or video_id,
+        "duration_sec": entry.get("duration"),
+        "channel": entry.get("channel") or entry.get("uploader"),
+        "url": entry.get("webpage_url")
+        or f"https://www.youtube.com/watch?v={video_id}",
+    }
+
+
 def resolve_video_id(url: str) -> str:
     """No bytes downloaded -- lets callers check "already ingested" before
     spending any bandwidth."""
-    result = subprocess.run(
-        [sys.executable, "-m", "yt_dlp", "--skip-download", "--print", "%(id)s", url],
-        capture_output=True, text=True, check=True,
+    return resolve_video_meta(url)["video_id"]
+
+
+def write_video_meta(video_dir: Path, meta: dict) -> Path:
+    """Record who this video is, once, beside its clips.
+
+    ingested_at is added here rather than by the caller so every meta.json
+    carries the same field, whichever stage wrote it.
+    """
+    return write_video_meta_file(
+        video_dir,
+        {**meta, "ingested_at": datetime.now(UTC).isoformat()},
     )
-    video_id = result.stdout.strip().splitlines()[-1]
-    if not video_id:
-        raise RuntimeError(f"yt-dlp returned no video id for {url}")
-    return video_id
+
+
+def ensure_video_meta(url: str, video_dir: Path) -> Path | None:
+    """Write meta.json unless the video already has one.
+
+    Returns None when nothing was written, so a resumed ingest neither pays
+    for a second yt-dlp request nor overwrites a title a person corrected by
+    hand.
+    """
+    if read_video_meta(video_dir):
+        return None
+    return write_video_meta(video_dir, resolve_video_meta(url))
 
 
 def download_audio(url: str, out_wav: Path) -> Path:

@@ -7,8 +7,8 @@ no HTTP client and no real subprocess needed.
 import pytest
 from fastapi import HTTPException
 
-from jeanlucrecord.core.job_runner import _build_command
-from jeanlucrecord.schemas import JobRequest
+from voice_factory.core.job_runner import _build_command
+from voice_factory.schemas import JobRequest
 
 
 def test_build_command_needs_no_character_for_youtube_ingest_stages():

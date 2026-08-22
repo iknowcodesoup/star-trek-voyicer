@@ -8,10 +8,10 @@ import asyncio
 
 from fastapi import APIRouter, Depends, Query, status
 
-from jeanlucrecord.core.job_runner import JobRunner
-from jeanlucrecord.core.training_log_reader import read_from
-from jeanlucrecord.dependencies import get_job_runner
-from jeanlucrecord.schemas import Job, JobRequest
+from voice_factory.core.job_runner import JobRunner
+from voice_factory.core.training_log_reader import read_from
+from voice_factory.dependencies import get_job_runner
+from voice_factory.schemas import Job, JobRequest
 
 router = APIRouter(tags=["Jobs"])
 

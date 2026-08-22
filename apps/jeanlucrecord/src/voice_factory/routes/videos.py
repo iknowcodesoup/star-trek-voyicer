@@ -10,12 +10,23 @@ import json
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
 
-from jeanlucrecord.core import clip_review
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.filesystem_layout import check_name
-from jeanlucrecord.repositories.review_csv_repository import read_review_csv, write_review_csv
-from jeanlucrecord.repositories.speaker_map_repository import SPEAKER_MAP_FILENAME
-from jeanlucrecord.schemas import ClipDecisionRequest
+from voice_factory.core import clip_review
+from voice_factory.infrastructure.filesystem_layout import (
+    check_name,
+    require_work_dir,
+)
+from voice_factory.repositories.review_csv_repository import (
+    read_review_csv,
+    write_review_csv,
+)
+from voice_factory.repositories.speaker_map_repository import (
+    SPEAKER_MAP_FILENAME,
+)
+from voice_factory.repositories.video_meta_repository import (
+    read_video_meta,
+    write_video_meta_file,
+)
+from voice_factory.schemas import ClipDecisionRequest, VideoRenameRequest
 
 router = APIRouter(tags=["Videos"])
 
@@ -28,7 +39,10 @@ async def get_videos() -> dict:
     the factory to ingest it again -- see /videos/{video_id}/speakers and the
     four clip routes below, none of which take a character either.
     """
-    youtube_dir = filesystem_layout.WORK_DIR / "youtube"
+    # An absent WORK_DIR is a broken deployment and raises. An absent
+    # youtube/ under a WORK_DIR that is there is a fresh install, which
+    # really has no videos yet.
+    youtube_dir = require_work_dir() / "youtube"
     if not youtube_dir.exists():
         return {"videos": []}
     videos = [
@@ -37,6 +51,30 @@ async def get_videos() -> dict:
         if video_dir.is_dir()
     ]
     return {"videos": videos}
+
+
+@router.patch("/videos/{video_id}")
+async def patch_video(video_id: str, rename_request: VideoRenameRequest) -> dict:
+    """Rename a video.
+
+    The title belongs to the video, not to any run that claims it, so a rename
+    is visible to every character that shares it - the same reason meta.json
+    sits beside the clips rather than in a caller's database.
+
+    Merged over the existing meta, never written on top of it: url, channel,
+    and ingested_at are yt-dlp's answers and a rename must not drop them.
+    ensure_video_meta already refuses to overwrite "a title a person corrected
+    by hand", and this is the route that does the correcting.
+    """
+    video_directory = clip_review.video_dir(video_id)
+    if not video_directory.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No video {video_id}")
+
+    meta = read_video_meta(video_directory)
+    write_video_meta_file(
+        video_directory, {**meta, "title": rename_request.title}
+    )
+    return clip_review.video_summary(video_directory)
 
 
 @router.get("/videos/{video_id}/speakers")
@@ -137,7 +175,17 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
     write_review_csv(
         review_path, [clip_review.fill_missing_fields(row) for row in rows]
     )
-    return {"updated": len(decisions_request.decisions)}
+    # The clips as they now stand, not just how many changed: a caller that
+    # edited them needs the new state, and a count makes it go and ask again
+    # for what this call already knows.
+    return {
+        "video_id": video_id,
+        "updated": len(decisions_request.decisions),
+        "clips": [
+            clip_review.clip_from_row(by_clip_id[decision.clip_id])
+            for decision in decisions_request.decisions
+        ],
+    }
 
 
 @router.get("/videos/{video_id}/clips/{clip_id}/audio")

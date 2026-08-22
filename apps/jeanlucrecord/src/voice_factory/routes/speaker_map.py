@@ -6,15 +6,16 @@ speaker assignment happen in jeanlucrecord" should be a one-file answer.
 
 from fastapi import APIRouter, HTTPException, status
 
-from jeanlucrecord.core import clip_review, speaker_assignment
-from jeanlucrecord.core.review_workflow import (
+from voice_factory.core import clip_review
+from voice_factory.core import speaker_assignment
+from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
     commit_reviewed_clips,
     write_speaker_map,
 )
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.filesystem_layout import check_name
-from jeanlucrecord.schemas import CommitRequest, SpeakerMapRequest
+from voice_factory.infrastructure import filesystem_layout
+from voice_factory.infrastructure.filesystem_layout import check_name
+from voice_factory.schemas import CommitRequest, SpeakerMapRequest
 
 router = APIRouter(tags=["Speaker Map"])
 

@@ -196,6 +196,15 @@ just serve-jeanlucrecord        # http://127.0.0.1:8100
 None of the `/videos/...` routes take a character: a video is ingested once and shared
 across every character that later claims it (see `speaker_map.json` below).
 
+`GET /videos` names each video from `meta.json`, written beside the clips at ingest. The
+video owns its title, so every character that claims it reads the same name. A video
+ingested before `meta.json` existed reports its id as the title and null for the rest.
+
+`GET /videos` and `GET /characters` answer 500 when `WORK_DIR` does not exist. That is a
+broken deployment, not an empty install, and an empty list would hide it. A `WORK_DIR`
+that is there with no `youtube/` under it is a fresh install, and answers 200 with an
+empty list.
+
 `POST /jobs` returns at once. It never waits for a stage to finish, because training takes
 days. Poll `/jobs/{id}` and read `/jobs/{id}/logs` for progress.
 

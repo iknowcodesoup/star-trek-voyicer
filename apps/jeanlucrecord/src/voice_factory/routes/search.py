@@ -5,8 +5,11 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from jeanlucrecord.core.youtube_ingest import resolve_video_id
-from jeanlucrecord.core.youtube_search import SEARCH_LIMIT_DEFAULT, search_videos
+from voice_factory.core.youtube_ingest import resolve_video_id
+from voice_factory.core.youtube_search import (
+    SEARCH_LIMIT_DEFAULT,
+    search_videos,
+)
 
 router = APIRouter(tags=["Search"])
 
