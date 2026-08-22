@@ -6,8 +6,8 @@ own src/dependencies.py precedent.
 
 from fastapi import Request
 
-from jeanlucrecord.core.job_runner import JobRunner
-from jeanlucrecord.infrastructure.webhook_gateway import WebhookNotifier
+from voice_factory.core.job_runner import JobRunner
+from voice_factory.infrastructure.webhook_gateway import WebhookNotifier
 
 
 def get_job_runner(request: Request) -> JobRunner:

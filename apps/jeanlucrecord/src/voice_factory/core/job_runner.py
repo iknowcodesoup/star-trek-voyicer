@@ -15,11 +15,14 @@ from pathlib import Path
 
 from fastapi import HTTPException, status
 
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.filesystem_layout import check_name
-from jeanlucrecord.infrastructure.webhook_gateway import WebhookNotifier
-from jeanlucrecord.repositories.job_state_repository import load_jobs, save_jobs
-from jeanlucrecord.schemas import YOUTUBE_STAGES_NEEDING_URL, Job, JobRequest
+from voice_factory.infrastructure import filesystem_layout
+from voice_factory.infrastructure.filesystem_layout import check_name
+from voice_factory.infrastructure.webhook_gateway import WebhookNotifier
+from voice_factory.repositories.job_state_repository import (
+    load_jobs,
+    save_jobs,
+)
+from voice_factory.schemas import YOUTUBE_STAGES_NEEDING_URL, Job, JobRequest
 
 
 def _now() -> str:
@@ -60,7 +63,7 @@ def _build_command(request: JobRequest) -> list[str]:
             status.HTTP_422_UNPROCESSABLE_ENTITY, "stage import needs an import_dir"
         )
 
-    command = [sys.executable, "-m", "jeanlucrecord.cli"]
+    command = [sys.executable, "-m", "voice_factory.cli"]
     if request.character:
         command.append(request.character)
     command += ["--stage", request.stage]

@@ -2,7 +2,7 @@
 
 Exists so an outside orchestrator can drive the pipeline that cli.py already
 implements. It does not reimplement any stage: every job spawns
-`python -m jeanlucrecord.cli <character> --stage <stage>` as a child process
+`python -m voice_factory.cli <character> --stage <stage>` as a child process
 and tails its output. cli.py stays the single definition of what each stage
 does, and the command line keeps working unchanged.
 
@@ -20,11 +20,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from jeanlucrecord import config
-from jeanlucrecord.core.job_runner import JobRunner
-from jeanlucrecord.infrastructure import filesystem_layout
-from jeanlucrecord.infrastructure.webhook_gateway import WebhookNotifier
-from jeanlucrecord.routes import (
+from voice_factory import config
+from voice_factory.core.job_runner import JobRunner
+from voice_factory.infrastructure import filesystem_layout
+from voice_factory.infrastructure.webhook_gateway import WebhookNotifier
+from voice_factory.routes import (
     characters,
     health,
     jobs,

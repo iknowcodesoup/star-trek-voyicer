@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from jeanlucrecord.core.resample import normalize_ref_wav
+from voice_factory.core.resample import normalize_ref_wav
 
 
 def load_metadata(path: Path) -> list[tuple[str, str]]:
@@ -36,7 +36,11 @@ def import_dataset(source_dir: Path, out_dir: Path) -> None:
     wav_dir = out_dir / "wavs"
     wav_dir.mkdir(parents=True, exist_ok=True)
     dest_metadata = out_dir / "metadata.csv"
-    existing = {clip_id for clip_id, _ in load_metadata(dest_metadata)} if dest_metadata.exists() else set()
+    existing = (
+        {clip_id for clip_id, _ in load_metadata(dest_metadata)}
+        if dest_metadata.exists()
+        else set()
+    )
 
     imported = 0
     dropped = 0
@@ -56,4 +60,6 @@ def import_dataset(source_dir: Path, out_dir: Path) -> None:
             metadata_file.flush()
             imported += 1
 
-    print(f"Imported {imported} clip(s) from {source_dir}, dropped {dropped} (no matching wav).")
+    print(
+        f"Imported {imported} clip(s) from {source_dir}, dropped {dropped} (no matching wav)."
+    )

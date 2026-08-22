@@ -40,15 +40,21 @@ dev = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# Standard src layout. The distribution is jeanlucrecord (the app and the
+# command), but the import package is voice_factory -- the name the
+# orchestrator already uses for this service in VOICE_FACTORY_URL and
+# VoiceFactoryGateway. Keep the package one directory below src/: every path
+# root in the package resolves by counting parents from __file__, so a flatter
+# layout retargets WORK_DIR and .env without raising anything.
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["jeanlucrecord*"]
+include = ["voice_factory*"]
 
 [tool.setuptools.package-data]
-jeanlucrecord = ["data/*.txt"]
+voice_factory = ["data/*.txt"]
 
 [project.scripts]
-jeanlucrecord = "jeanlucrecord.cli:main"
+jeanlucrecord = "voice_factory.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

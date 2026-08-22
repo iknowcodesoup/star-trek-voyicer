@@ -11,11 +11,11 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
-from jeanlucrecord.repositories.review_csv_repository import (
+from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
     read_review_csv,
 )
-from jeanlucrecord.repositories.speaker_map_repository import (
+from voice_factory.repositories.speaker_map_repository import (
     SPEAKER_MAP_FILENAME,
     read_speaker_map,
     write_speaker_map_file,

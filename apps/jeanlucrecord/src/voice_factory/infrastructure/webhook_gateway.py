@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from jeanlucrecord.core.training_log_reader import parse_training_log
+from voice_factory.core.training_log_reader import parse_training_log
 
 WEBHOOK_TOKEN_HEADER = "X-Voice-Factory-Token"
 WEBHOOK_TIMEOUT_SECONDS = 10.0
