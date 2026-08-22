@@ -79,6 +79,9 @@ class ClipDecision(BaseModel):
     clip_id: str
     keep: bool | None = None
     speaker_label: str | None = None
+    # Who this one clip is for. Reassigning it is the reviewer's whole job, so
+    # unlike speaker_label it is never a conflict. An empty string clears it.
+    assigned_voice: str | None = None
     text: str | None = None
 
 

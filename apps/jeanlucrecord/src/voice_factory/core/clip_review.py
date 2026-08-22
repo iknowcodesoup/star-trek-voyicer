@@ -82,6 +82,7 @@ def clip_from_row(row: dict) -> dict:
         "flagged": row.get("flagged") == "1",
         "speaker_label": row.get("speaker_label") or None,
         "speaker_coverage": parse_optional_float(row.get("speaker_coverage")),
+        "assigned_voice": row.get("assigned_voice") or None,
         "duration_sec": parse_optional_float(row.get("duration_sec")),
         "start_sec": parse_optional_float(row.get("start_sec")),
         "end_sec": parse_optional_float(row.get("end_sec")),

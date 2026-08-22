@@ -127,6 +127,10 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
     cross-character corruption this story guards against. A conflicting
     reassignment is rejected with 409 instead of applied. Full multi-claimant
     routing is Story 2.2's job -- this is the narrow stopgap.
+
+    `assigned_voice` is neither of those. It is the reviewer's per-clip answer
+    to "who is this for", it is expected to change as they work, and it never
+    conflicts: one clip carries one assignment and only this route writes it.
     """
     review_path = clip_review.review_path(video_id)
     rows = read_review_csv(review_path)
@@ -169,6 +173,8 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
             row["keep"] = "1" if decision.keep else "0"
         if decision.speaker_label is not None:
             row["speaker_label"] = decision.speaker_label
+        if decision.assigned_voice is not None:
+            row["assigned_voice"] = decision.assigned_voice
         if decision.text is not None:
             row["text"] = decision.text
 
