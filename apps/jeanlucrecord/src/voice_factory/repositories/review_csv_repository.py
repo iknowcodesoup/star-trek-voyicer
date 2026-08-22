@@ -12,6 +12,12 @@ REVIEW_CSV_NAME = "review.csv"
 # speaker_label and speaker_coverage are only filled in when ingest ran with
 # --diarize. csv.DictReader returns None for them on a review.csv written before
 # diarization existed, so old files still commit.
+#
+# assigned_voice is the reviewer's answer, one clip at a time, and is separate
+# from speaker_label on purpose: speaker_label is what diarization heard, which
+# stays as recorded, and assigned_voice is who the clip is for. A review.csv
+# written before this column existed reads back without it, and
+# fill_missing_fields supplies the empty value.
 REVIEW_FIELDS = [
     "clip_id",
     "keep",
@@ -19,6 +25,7 @@ REVIEW_FIELDS = [
     "flagged",
     "speaker_label",
     "speaker_coverage",
+    "assigned_voice",
     "duration_sec",
     "start_sec",
     "end_sec",
