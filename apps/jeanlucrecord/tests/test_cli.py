@@ -6,11 +6,19 @@ dependencies of this project's own uv environment, so importing cli.py
 directly here needs no extra setup, just a normal `uv run pytest tests/`.
 """
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from voice_factory import cli
+from voice_factory.core.audio_slicing import TARGET_RATE
+from voice_factory.repositories.review_csv_repository import (
+    read_review_csv,
+    write_review_csv,
+)
 
 
 def write_metadata(directory: Path, rows: list[str]) -> Path:
@@ -253,3 +261,84 @@ def test_stage_preprocess_does_not_write_a_sidecar_when_run_docker_fails(
         cli.stage_preprocess("janeway")
 
     assert cli._load_sidecar(training_dir) is None
+
+
+# -- stage_youtube_chunk / stage_youtube_review --------------------------
+
+
+URL = "https://example.com/watch?v=vid1"
+
+
+def build_ingested_video(
+    tmp_path, monkeypatch, num_seconds: float = 10.0
+) -> Path:
+    """A video that has already run through download + transcribe, with a
+    real full.wav so stage_youtube_review's scoring has something to slice.
+    Bypasses video_dir_for's yt-dlp call by seeding its memo dict directly."""
+    video_dir = tmp_path / "work" / "youtube" / "vid1"
+    video_dir.mkdir(parents=True)
+    monkeypatch.setattr(cli, "_video_dirs", {URL: video_dir})
+
+    ramp = np.arange(round(num_seconds * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
+
+    transcript = [
+        {"start": 1.0, "end": 3.0, "text": "first line"},
+        {"start": 5.0, "end": 7.0, "text": "second line"},
+    ]
+    (video_dir / "transcript.json").write_text(
+        json.dumps(transcript), encoding="utf-8"
+    )
+    return video_dir
+
+
+def test_youtube_chunk_writes_clips_json_and_creates_no_wav_files(
+    tmp_path, monkeypatch
+):
+    video_dir = build_ingested_video(tmp_path, monkeypatch)
+
+    cli.stage_youtube_chunk(URL, min_duration=1.0, max_duration=30.0)
+
+    clips_path = video_dir / "clips.json"
+    assert clips_path.exists()
+    clips = json.loads(clips_path.read_text(encoding="utf-8"))
+    assert [clip["clip_id"] for clip in clips] == ["clip_0001", "clip_0002"]
+    assert not (video_dir / "clips").exists()
+
+
+def test_youtube_review_appends_new_clip_ids_and_leaves_hand_edits_untouched(
+    tmp_path, monkeypatch
+):
+    video_dir = build_ingested_video(tmp_path, monkeypatch)
+    cli.stage_youtube_chunk(URL, min_duration=1.0, max_duration=30.0)
+
+    cli.stage_youtube_review(URL, quality_flag_threshold=18.0)
+
+    review_path = video_dir / "review.csv"
+    rows = read_review_csv(review_path)
+    assert {r["clip_id"] for r in rows} == {"clip_0001", "clip_0002"}
+
+    # a person hand-edits one row
+    for r in rows:
+        if r["clip_id"] == "clip_0001":
+            r["keep"] = "0"
+            r["text"] = "corrected by hand"
+            r["start_sec"] = "0.5"
+    write_review_csv(review_path, rows)
+
+    # a third segment lands in a re-plan (e.g. after tuning padding)
+    transcript = json.loads((video_dir / "transcript.json").read_text())
+    transcript.append({"start": 9.0, "end": 9.5, "text": "third line"})
+    (video_dir / "transcript.json").write_text(
+        json.dumps(transcript), encoding="utf-8"
+    )
+    cli.stage_youtube_chunk(URL, min_duration=1.0, max_duration=30.0)
+
+    cli.stage_youtube_review(URL, quality_flag_threshold=18.0)
+
+    rows_after = {r["clip_id"]: r for r in read_review_csv(review_path)}
+    assert set(rows_after) == {"clip_0001", "clip_0002", "clip_0003"}
+    # the hand-edited row survived exactly as edited
+    assert rows_after["clip_0001"]["keep"] == "0"
+    assert rows_after["clip_0001"]["text"] == "corrected by hand"
+    assert rows_after["clip_0001"]["start_sec"] == "0.5"

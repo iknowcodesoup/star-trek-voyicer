@@ -30,17 +30,24 @@ REVIEW_FIELDS = [
     "start_sec",
     "end_sec",
     "text",
+    "excluded_reason",
 ]
 
 
 def write_review_csv(path: Path, rows: list[dict]) -> None:
     """Comma-delimited, header row, Excel-openable -- deliberately different
     from the pipe-delimited LJSpeech metadata.csv. Sorted ascending by
-    quality_score (worst/noisiest first) so manual attention goes where
-    it's most needed."""
+    (is_length_excluded, quality_score): a retained too-short/too-long clip
+    scores near 0 same as genuinely noisy audio, and without the first sort
+    key it would bury real noise at the top instead of grouping separately
+    with the other retained-but-excluded rows."""
     # float(), not the raw value: rows read back from an existing review.csv
     # carry quality_score as a string, which would sort lexicographically
-    ordered = sorted(rows, key=lambda r: float(r["quality_score"]))
+    def sort_key(r: dict) -> tuple[bool, float]:
+        is_length_excluded = r.get("excluded_reason") in ("too_short", "too_long")
+        return (is_length_excluded, float(r["quality_score"]))
+
+    ordered = sorted(rows, key=sort_key)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=REVIEW_FIELDS, extrasaction="ignore")
         writer.writeheader()

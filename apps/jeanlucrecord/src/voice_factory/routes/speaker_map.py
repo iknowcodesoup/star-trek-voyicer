@@ -4,10 +4,11 @@ Kept as its own small router, separate from videos.py, because "where does
 speaker assignment happen in jeanlucrecord" should be a one-file answer.
 """
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, status
 
-from voice_factory.core import clip_review
-from voice_factory.core import speaker_assignment
+from voice_factory.core import clip_review, speaker_assignment
 from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
     commit_reviewed_clips,
@@ -92,8 +93,15 @@ async def post_videos_commit(commit_request: CommitRequest) -> dict:
     # out_dir=None: a batched, multi-character call has no single "committing
     # character" to fall back to, so an unmapped or undiarized clip is left
     # uncommitted rather than guessed at (see commit_reviewed_clips).
-    result = commit_reviewed_clips(
-        filesystem_layout.WORK_DIR / "youtube", None, clip_review.dataset_dir_for
+    #
+    # Run in a thread: commit now decodes and re-encodes audio per clip
+    # across every video (see commit_reviewed_clips), which would otherwise
+    # block the event loop for the whole call.
+    result = await asyncio.to_thread(
+        commit_reviewed_clips,
+        filesystem_layout.WORK_DIR / "youtube",
+        None,
+        clip_review.dataset_dir_for,
     )
     committed = {
         target.parent.name: count

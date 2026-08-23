@@ -5,13 +5,18 @@ every character that later claims it -- see /videos/{video_id}/speakers and
 the clip routes below, all keyed on video_id alone.
 """
 
+import asyncio
+import io
 import json
 import shutil
 
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
+import soundfile as sf
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import FileResponse, Response
 
 from voice_factory.core import clip_review
+from voice_factory.core.audio_slicing import TARGET_RATE, read_slice
+from voice_factory.core.quality import clip_quality_score
 from voice_factory.infrastructure.filesystem_layout import (
     check_name,
     require_work_dir,
@@ -30,6 +35,25 @@ from voice_factory.repositories.video_meta_repository import (
 from voice_factory.schemas import ClipDecisionRequest, VideoRenameRequest
 
 router = APIRouter(tags=["Videos"])
+
+# Mirrors plan_clips's own defaults (core/youtube_ingest.py). A trim has no
+# access to whatever --min/--max-clip-duration the original ingest ran with,
+# so re-deriving excluded_reason here uses the same defaults every ingest
+# uses unless overridden -- the same trade-off RETAIN_FLOOR_SEC and
+# RETAIN_CEILING_SEC already make as fixed constants rather than per-video
+# settings.
+MIN_CLIP_DURATION_SEC = 1.0
+MAX_CLIP_DURATION_SEC = 30.0
+
+MAX_PAD_SEC = 10.0
+
+
+def _length_excluded_reason(duration_sec: float) -> str:
+    if duration_sec < MIN_CLIP_DURATION_SEC:
+        return "too_short"
+    if duration_sec > MAX_CLIP_DURATION_SEC:
+        return "too_long"
+    return ""
 
 
 @router.get("/videos")
@@ -144,6 +168,14 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
     `assigned_voice` is neither of those. It is the reviewer's per-clip answer
     to "who is this for", it is expected to change as they work, and it never
     conflicts: one clip carries one assignment and only this route writes it.
+
+    `start_sec`/`end_sec` is the trim bar's write. Trimming does not touch
+    `keep` -- the two are orthogonal, a reviewer's choice either way. Both
+    bounds must be given together; end_sec <= start_sec or either being
+    negative is 422. A bounds change recomputes duration_sec, re-derives the
+    length-based excluded_reason (so extending a too_short clip clears it),
+    and rescores quality_score from the new slice -- a stale score would
+    misreport the flag badge and the sort in review.csv.
     """
     review_path = clip_review.review_path(video_id)
     rows = read_review_csv(review_path)
@@ -158,6 +190,25 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"Unknown clip ids: {', '.join(unknown)}"
         )
+
+    for decision in decisions_request.decisions:
+        if decision.start_sec is None and decision.end_sec is None:
+            continue
+        if decision.start_sec is None or decision.end_sec is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Clip {decision.clip_id}: start_sec and end_sec must be given together.",
+            )
+        if decision.start_sec < 0 or decision.end_sec < 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Clip {decision.clip_id}: start_sec and end_sec must not be negative.",
+            )
+        if decision.end_sec <= decision.start_sec:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Clip {decision.clip_id}: end_sec must be greater than start_sec.",
+            )
 
     against_recorded = {
         decision.clip_id
@@ -180,6 +231,9 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
             "instead, or resubmit without reassigning these clips.",
         )
 
+    video_directory = clip_review.video_dir(video_id)
+    full_wav = video_directory / "full.wav"
+
     for decision in decisions_request.decisions:
         row = by_clip_id[decision.clip_id]
         if decision.keep is not None:
@@ -190,6 +244,18 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
             row["assigned_voice"] = decision.assigned_voice
         if decision.text is not None:
             row["text"] = decision.text
+        if decision.start_sec is not None and decision.end_sec is not None:
+            row["start_sec"] = decision.start_sec
+            row["end_sec"] = decision.end_sec
+            row["duration_sec"] = decision.end_sec - decision.start_sec
+            row["excluded_reason"] = _length_excluded_reason(
+                decision.end_sec - decision.start_sec
+            )
+            if full_wav.exists():
+                samples = await asyncio.to_thread(
+                    read_slice, full_wav, decision.start_sec, decision.end_sec
+                )
+                row["quality_score"] = clip_quality_score(samples)
 
     write_review_csv(
         review_path, [clip_review.fill_missing_fields(row) for row in rows]
@@ -208,9 +274,49 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
 
 
 @router.get("/videos/{video_id}/clips/{clip_id}/audio")
-async def get_clip_audio(video_id: str, clip_id: str) -> FileResponse:
+async def get_clip_audio(
+    video_id: str,
+    clip_id: str,
+    pad_sec: float = Query(0.0, ge=0.0, le=MAX_PAD_SEC),
+) -> Response:
+    """Stream one clip's audio, sliced on the fly from full.wav.
+
+    full.wav wins over a pre-cut clips/{id}.wav whenever both exist -- a
+    reviewer's trim only ever changes review.csv's bounds, and the old cut
+    would silently outlive it otherwise (see review_workflow's commit
+    precedence, which makes the same call). The pre-cut file is the fallback
+    for a video an operator already reclaimed full.wav's disk space from,
+    after review is long done.
+
+    One route, not a second "with padding" endpoint: both would duplicate
+    this same row lookup and precedence, and the pre-cut fallback has no
+    audio outside its own bounds to honour a pad from anyway. No response
+    header describes the granted window either -- that would need
+    Access-Control-Expose-Headers on the orchestrator's CORS middleware, a
+    silent-failure step. The client derives it instead:
+    windowStart = max(0, startSec - padSec), windowEnd = windowStart + duration.
+    """
     check_name(clip_id, "clip_id")
-    clip_path = clip_review.video_dir(video_id) / "clips" / f"{clip_id}.wav"
+    video_directory = clip_review.video_dir(video_id)
+    full_wav = video_directory / "full.wav"
+
+    if full_wav.exists():
+        rows = read_review_csv(clip_review.review_path(video_id))
+        row = next((r for r in rows if r["clip_id"] == clip_id), None)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No clip {clip_id}")
+        start_sec = float(row["start_sec"]) - pad_sec
+        end_sec = float(row["end_sec"]) + pad_sec
+        samples = read_slice(full_wav, start_sec, end_sec)
+        buffer = io.BytesIO()
+        sf.write(buffer, samples, TARGET_RATE, format="WAV", subtype="PCM_16")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="audio/wav",
+            headers={"Accept-Ranges": "none"},
+        )
+
+    clip_path = video_directory / "clips" / f"{clip_id}.wav"
     if not clip_path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No clip {clip_id}")
     return FileResponse(clip_path, media_type="audio/wav")

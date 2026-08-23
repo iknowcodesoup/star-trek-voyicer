@@ -1,7 +1,4 @@
-from pathlib import Path
-
 import numpy as np
-import soundfile as sf
 
 FLAG_THRESHOLD_DB = 18.0
 
@@ -9,14 +6,21 @@ FRAME_LENGTH = 1024
 HOP_LENGTH = 512
 
 
-def clip_quality_score(wav_path: Path, frame_length: int = FRAME_LENGTH, hop_length: int = HOP_LENGTH) -> float:
+def clip_quality_score(
+    samples: np.ndarray, frame_length: int = FRAME_LENGTH, hop_length: int = HOP_LENGTH
+) -> float:
     """p90(frame RMS dB) - p10(frame RMS dB).
 
     Clean narration has a big gap between loud speech frames and quiet gaps
     between words/sentences. Continuous background noise, music, or cross-talk
     fills in the quiet frames too, compressing that range. Higher score = cleaner.
+
+    Takes samples, not a path -- both call sites (stage_youtube_review,
+    patch_clips's rescoring) already hold the slice in memory via
+    audio_slicing.read_slice, and a path-taking overload would let a caller
+    reread a file it already read.
     """
-    data, _ = sf.read(wav_path, dtype="float32", always_2d=False)
+    data = samples
     if data.ndim > 1:
         data = data.mean(axis=1)
     if len(data) < frame_length:

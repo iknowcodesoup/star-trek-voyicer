@@ -83,6 +83,11 @@ class ClipDecision(BaseModel):
     # unlike speaker_label it is never a conflict. An empty string clears it.
     assigned_voice: str | None = None
     text: str | None = None
+    # A trim from the review UI. Orthogonal to keep -- trimming a clip does
+    # not mark it kept. Both must be given together; patch_clips 422s on
+    # end_sec <= start_sec or either being negative.
+    start_sec: float | None = None
+    end_sec: float | None = None
 
 
 class ClipDecisionRequest(BaseModel):

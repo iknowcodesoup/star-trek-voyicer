@@ -1,7 +1,12 @@
 """Tests for the video-scoped routes in routes/videos.py."""
 
+import io
 from pathlib import Path
 
+import numpy as np
+import soundfile as sf
+
+from voice_factory.core.audio_slicing import TARGET_RATE
 from voice_factory.core.youtube_ingest import DIARIZATION_NAME
 from voice_factory.repositories.review_csv_repository import write_review_csv
 from voice_factory.repositories.video_meta_repository import write_video_meta_file
@@ -382,6 +387,109 @@ def test_get_video_speakers_404s_for_an_unknown_video(client, work_dir):
     response = client.get("/videos/nope/speakers")
 
     assert response.status_code == 404
+
+
+def build_video_with_full_wav(
+    work_dir: Path, video_id: str, rows: list[dict], num_seconds: float = 10.0
+) -> Path:
+    video_dir = work_dir / "youtube" / video_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    ramp = np.arange(round(num_seconds * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
+    write_review_csv(video_dir / "review.csv", rows)
+    return video_dir
+
+
+def test_get_clip_audio_slices_full_wav_at_the_row_bounds(client, work_dir):
+    build_video_with_full_wav(work_dir, "vid1", [row("clip_0001")])
+
+    response = client.get("/videos/vid1/clips/clip_0001/audio")
+
+    assert response.status_code == 200
+    samples, rate = sf.read(io.BytesIO(response.content), dtype="int16")
+    assert rate == TARGET_RATE
+    # row("clip_0001") carries start_sec=0.0, end_sec=3.0
+    assert len(samples) == round(3.0 * TARGET_RATE)
+
+
+def test_get_clip_audio_pad_sec_widens_the_window(client, work_dir):
+    clip_row = row("clip_0001")
+    clip_row["start_sec"] = 4.0
+    clip_row["end_sec"] = 6.0
+    build_video_with_full_wav(work_dir, "vid1", [clip_row])
+
+    response = client.get(
+        "/videos/vid1/clips/clip_0001/audio", params={"pad_sec": 1.0}
+    )
+
+    samples, _ = sf.read(io.BytesIO(response.content), dtype="int16")
+    assert len(samples) == round(4.0 * TARGET_RATE)  # (6+1) - (4-1)
+
+
+def test_get_clip_audio_padded_window_clamps_to_the_file_start(client, work_dir):
+    clip_row = row("clip_0001")
+    clip_row["start_sec"] = 0.5
+    clip_row["end_sec"] = 2.0
+    build_video_with_full_wav(work_dir, "vid1", [clip_row])
+
+    response = client.get(
+        "/videos/vid1/clips/clip_0001/audio", params={"pad_sec": 5.0}
+    )
+
+    samples, _ = sf.read(io.BytesIO(response.content), dtype="int16")
+    # window would be [-4.5, 7.0), clamped to [0.0, 7.0)
+    assert len(samples) == round(7.0 * TARGET_RATE)
+
+
+def test_get_clip_audio_pad_sec_over_the_max_is_422(client, work_dir):
+    build_video_with_full_wav(work_dir, "vid1", [row("clip_0001")])
+
+    response = client.get(
+        "/videos/vid1/clips/clip_0001/audio", params={"pad_sec": 10.1}
+    )
+
+    assert response.status_code == 422
+
+
+def test_get_clip_audio_404s_when_neither_file_exists(client, work_dir):
+    video_dir = work_dir / "youtube" / "vid1"
+    video_dir.mkdir(parents=True)
+    write_review_csv(video_dir / "review.csv", [row("clip_0001")])
+
+    response = client.get("/videos/vid1/clips/clip_0001/audio")
+
+    assert response.status_code == 404
+
+
+def test_patch_clips_writes_reviewed_bounds_and_422s_on_end_before_start(
+    client, work_dir
+):
+    build_video(work_dir, "vid1", [row("clip_0001")])
+
+    response = client.patch(
+        "/videos/vid1/clips",
+        json={
+            "decisions": [
+                {"clip_id": "clip_0001", "start_sec": 0.5, "end_sec": 2.5}
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    clips = client.get("/videos/vid1/clips").json()["clips"]
+    assert clips[0]["start_sec"] == 0.5
+    assert clips[0]["end_sec"] == 2.5
+    assert clips[0]["duration_sec"] == 2.0
+
+    bad_response = client.patch(
+        "/videos/vid1/clips",
+        json={
+            "decisions": [
+                {"clip_id": "clip_0001", "start_sec": 3.0, "end_sec": 1.0}
+            ]
+        },
+    )
+    assert bad_response.status_code == 422
 
 
 def test_a_video_ingested_once_serves_every_character_that_claims_it(client, work_dir):

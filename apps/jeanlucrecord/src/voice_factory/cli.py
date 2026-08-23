@@ -8,12 +8,15 @@ import sys
 import threading
 from pathlib import Path
 
+import soundfile as sf
+
 # corpus text and Whisper transcripts can contain characters outside the
 # Windows console's default cp1252 codepage
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from voice_factory import config
+from voice_factory.core.audio_slicing import open_reader, read_slice_from
 from voice_factory.core.corpus import load_corpus, load_validation_sentences
 from voice_factory.core.diarization import (
     MIN_SPEAKER_COVERAGE,
@@ -31,14 +34,13 @@ from voice_factory.core.quality import (
 from voice_factory.core.resample import normalize_ref_wav, resample_dir
 from voice_factory.core.review_workflow import commit_reviewed_clips
 from voice_factory.core.youtube_ingest import (
-    CLIPS_DIR_NAME,
     CLIPS_NAME,
     DIARIZATION_NAME,
     FULL_WAV_NAME,
     TRANSCRIPT_NAME,
-    chunk_clips,
     download_audio,
     ensure_video_meta,
+    plan_clips,
     read_json,
     resolve_video_id,
     transcribe,
@@ -50,13 +52,13 @@ from voice_factory.core.youtube_search import (
 )
 from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
+    read_review_csv,
     write_review_csv,
 )
 from voice_factory.repositories.speaker_map_repository import (
     SPEAKER_MAP_FILENAME,
 )
 from voice_factory.schemas import (
-    YOUTUBE_INGEST_STEPS,
     YOUTUBE_STAGES_NEEDING_URL,
 )
 
@@ -301,7 +303,10 @@ def stage_youtube_transcribe(url: str, whisper_model: str) -> None:
 
 
 def stage_youtube_chunk(url: str, min_duration: float, max_duration: float) -> None:
-    """Cut the transcript's segments into clips, and record what survived."""
+    """Plan the transcript's segments into clip metadata -- no audio is cut
+    here. Cutting is deferred to commit time (see core/review_workflow.py),
+    so a re-plan after tuning the padding/duration constants needs no
+    re-download and no re-transcribe."""
     video_dir = video_dir_for(url)
     transcript_path = video_dir / TRANSCRIPT_NAME
     if not transcript_path.exists():
@@ -309,10 +314,10 @@ def stage_youtube_chunk(url: str, min_duration: float, max_duration: float) -> N
             f"No transcript at {transcript_path}. Run --stage youtube-transcribe first."
         )
 
-    clips = chunk_clips(
-        _require_audio(url),
+    media_duration_sec = sf.info(_require_audio(url)).duration
+    clips = plan_clips(
+        media_duration_sec,
         read_json(transcript_path),
-        video_dir / CLIPS_DIR_NAME,
         min_duration,
         max_duration,
     )
@@ -322,7 +327,7 @@ def stage_youtube_chunk(url: str, min_duration: float, max_duration: float) -> N
             "--min/--max-clip-duration and retry."
         )
     write_json(video_dir / CLIPS_NAME, clips)
-    print(f"{len(clips)} clip(s) at {video_dir / CLIPS_DIR_NAME}")
+    print(f"{len(clips)} clip(s) planned")
 
 
 def _require_clips(video_dir: Path) -> list[dict]:
@@ -358,51 +363,67 @@ def stage_youtube_diarize(
 
 
 def stage_youtube_review(url: str, quality_flag_threshold: float) -> None:
-    """Score every clip and write the review.csv an operator edits.
+    """Score every planned clip and write/merge review.csv, the file an
+    operator edits and the browser reviews clips against.
 
-    Never overwrites a review.csv that is already there. That file is the one
-    record of which clips a person accepted, and a retry that reached this step
-    must not throw those decisions away.
+    Append-only merge, not refuse-if-exists: a row already in review.csv is
+    never touched, which preserves the decision-protection guarantee exactly,
+    but a clip_id not yet present is added. That is what makes a re-plan safe
+    after tuning the padding/duration constants in plan_clips, instead of
+    requiring a hand-deleted review.csv every time.
     """
     video_dir = video_dir_for(url)
     review_path = video_dir / REVIEW_CSV_NAME
-    if review_path.exists():
-        print(f"Review already written at {review_path}, keeping its decisions.")
+    clips = _require_clips(video_dir)
+    existing_rows = read_review_csv(review_path) if review_path.exists() else []
+    already_present = {row["clip_id"] for row in existing_rows}
+    new_clips = [clip for clip in clips if clip["clip_id"] not in already_present]
+
+    if not new_clips:
+        print(f"Review already covers every planned clip at {review_path}.")
         return
 
-    clips = _require_clips(video_dir)
     # The artifact is the record: diarization ran if and only if it left its
     # cache behind, so no caller has to pass the flag through a second time.
     enable_diarization = (video_dir / DIARIZATION_NAME).exists()
 
-    rows = []
-    for clip in clips:
-        score = clip_quality_score(
-            video_dir / CLIPS_DIR_NAME / f"{clip['clip_id']}.wav"
-        )
-        flagged = is_flagged(score, quality_flag_threshold)
-        speaker_label = clip.get("speaker_label")
-        # a clip no single speaker owns is cross-talk or noise -- default it to
-        # keep=0 for the same reason a low quality score does
-        rejected_by_diarization = enable_diarization and speaker_label is None
-        rows.append(
-            {
-                "clip_id": clip["clip_id"],
-                "keep": "0" if flagged or rejected_by_diarization else "1",
-                "quality_score": round(score, 2),
-                "flagged": int(flagged),
-                "speaker_label": speaker_label or "",
-                "speaker_coverage": round(clip.get("speaker_coverage", 0.0), 3),
-                "duration_sec": round(clip["duration"], 2),
-                "start_sec": round(clip["start"], 2),
-                "end_sec": round(clip["end"], 2),
-                "text": clip["text"],
-            }
-        )
-    write_review_csv(review_path, rows)
+    new_rows = []
+    with open_reader(_require_audio(url)) as reader:
+        for clip in new_clips:
+            excluded_reason = clip.get("excluded_reason", "")
+            score = 0.0
+            flagged = False
+            if not excluded_reason:
+                samples = read_slice_from(reader, clip["start"], clip["end"])
+                score = clip_quality_score(samples)
+                flagged = is_flagged(score, quality_flag_threshold)
+                if flagged:
+                    excluded_reason = "low_quality"
+            speaker_label = clip.get("speaker_label")
+            # a clip no single speaker owns is cross-talk or noise -- default it
+            # to keep=0 for the same reason a low quality score does
+            rejected_by_diarization = enable_diarization and speaker_label is None
+            if rejected_by_diarization and not excluded_reason:
+                excluded_reason = "no_single_speaker"
+            new_rows.append(
+                {
+                    "clip_id": clip["clip_id"],
+                    "keep": "0" if excluded_reason else "1",
+                    "quality_score": round(score, 2),
+                    "flagged": int(flagged),
+                    "speaker_label": speaker_label or "",
+                    "speaker_coverage": round(clip.get("speaker_coverage", 0.0), 3),
+                    "duration_sec": round(clip["duration"], 2),
+                    "start_sec": round(clip["start"], 2),
+                    "end_sec": round(clip["end"], 2),
+                    "text": clip["text"],
+                    "excluded_reason": excluded_reason,
+                }
+            )
+    write_review_csv(review_path, [*existing_rows, *new_rows])
 
-    flagged_count = sum(r["flagged"] for r in rows)
-    print(f"\n{len(rows)} clip(s) ready for review at {review_path}")
+    flagged_count = sum(r["flagged"] for r in new_rows)
+    print(f"\n{len(new_rows)} new clip(s) ready for review at {review_path}")
     print(
         f"{flagged_count} flagged as likely low quality (keep=0 by default, worst-scoring first)."
     )
@@ -412,7 +433,7 @@ def stage_youtube_review(url: str, quality_flag_threshold: float) -> None:
             'character, e.g. {"SPEAKER_00": "janeway", "SPEAKER_01": null}.'
         )
     print(
-        f"Listen to clips under {video_dir / CLIPS_DIR_NAME}, edit the 'keep' column, "
+        "Fetch clip audio from the review API to listen, edit the 'keep' column, "
         "then run, for each character this video's clips should reach:"
     )
     print("  uv run jeanlucrecord <character> --stage youtube-commit")

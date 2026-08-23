@@ -1,8 +1,11 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile as sf
 
+from voice_factory.core.audio_slicing import TARGET_RATE
 from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
     commit_reviewed_clips,
@@ -384,3 +387,104 @@ def test_a_second_characters_later_commit_still_sees_the_previously_skipped_vide
     assert read_metadata(dataset_dir_for("chakotay")) == [
         "yt_vid_chakotay_clip_0001|line for clip_0001"
     ]
+
+
+# -- full.wav precedence (this story) ------------------------------------
+
+
+def build_video_with_full_wav(
+    youtube_dir: Path, video_id: str, rows: list[dict], num_seconds: float = 10.0
+) -> Path:
+    """A video with full.wav present, no clips/*.wav -- the shape every
+    video takes once plan_clips replaces chunk_clips (Stage 2)."""
+    video_dir = youtube_dir / video_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    ramp = np.arange(round(num_seconds * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
+    write_review_csv(video_dir / "review.csv", rows)
+    return video_dir
+
+
+def test_commit_cuts_from_full_wav_at_the_reviewed_bounds(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video_with_full_wav(
+        youtube_dir, "vid1", [row("clip_0001", speaker_label="")]
+    )
+    out_dir = tmp_path / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, out_dir)
+
+    assert result.newly_committed == 1
+    committed_wav = out_dir / "wavs" / "yt_vid1_clip_0001.wav"
+    assert committed_wav.exists()
+    samples, rate = sf.read(committed_wav, dtype="int16")
+    assert rate == TARGET_RATE
+    # row("clip_0001") carries start_sec=0.0, end_sec=3.0
+    assert len(samples) == round(3.0 * TARGET_RATE)
+
+
+def test_commit_falls_back_to_a_pre_cut_clip_when_there_is_no_full_wav(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001")])
+    out_dir = tmp_path / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, out_dir)
+
+    assert result.newly_committed == 1
+    assert (out_dir / "wavs" / "yt_vid1_clip_0001.wav").read_bytes() == (
+        b"RIFF-not-real-audio"
+    )
+
+
+def test_commit_prefers_full_wav_over_a_stale_pre_cut_clip(tmp_path):
+    """The precedence trap this story exists to close: every currently
+    ingested video already has a pre-cut clips/*.wav. A reviewer's trim only
+    ever changes review.csv's bounds, so if the stale pre-cut file won the
+    naive "prefer the pre-cut file" ordering, the fix would never reach the
+    dataset and nothing would error."""
+    youtube_dir = tmp_path / "youtube"
+    video_dir = build_video(youtube_dir, "vid1", [row("clip_0001")])
+    ramp = np.arange(round(10.0 * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
+    out_dir = tmp_path / "dataset"
+
+    commit_reviewed_clips(youtube_dir, out_dir)
+
+    committed_wav = out_dir / "wavs" / "yt_vid1_clip_0001.wav"
+    samples, _ = sf.read(committed_wav, dtype="int16")
+    # sliced from full.wav's ramp, not the stale "RIFF-not-real-audio" bytes
+    assert samples[0] == 0
+    assert len(samples) == round(3.0 * TARGET_RATE)
+
+
+def test_commit_clamps_bounds_past_eof(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    clip_row = row("clip_0001", speaker_label="")
+    clip_row["end_sec"] = 500.0  # past the 10s fixture
+    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
+    out_dir = tmp_path / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, out_dir)
+
+    assert result.newly_committed == 1
+    samples, _ = sf.read(
+        out_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
+    )
+    assert len(samples) == round(10.0 * TARGET_RATE) - round(0.0 * TARGET_RATE)
+
+
+def test_commit_skips_a_row_that_clamps_to_zero_frames(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    clip_row = row("clip_0001", speaker_label="")
+    clip_row["start_sec"] = 500.0  # past EOF, so start clamps to the same
+    clip_row["end_sec"] = 600.0  # frame end does, leaving nothing to write
+    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
+    out_dir = tmp_path / "dataset"
+
+    result = commit_reviewed_clips(youtube_dir, out_dir)
+
+    assert result.newly_committed == 0
+    assert read_metadata(out_dir) == []
+    assert not (out_dir / "wavs" / "yt_vid1_clip_0001.wav").exists()
+    committed_text = (youtube_dir / "vid1" / "committed.csv").read_text()
+    assert "clip_0001" not in committed_text

@@ -11,6 +11,9 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
+import soundfile as sf
+
+from voice_factory.core.audio_slicing import write_slice_from
 from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
     read_review_csv,
@@ -104,6 +107,18 @@ def commit_reviewed_clips(
             committed_path = video_dir / "committed.csv"
             committed = load_committed(committed_path)
 
+            # full.wav wins whenever it exists, even over a stale pre-cut
+            # clips/{id}.wav from before this story: every trim a reviewer
+            # makes only ever changes review.csv's bounds, and the old cut
+            # would silently outlive it under the reverse precedence. Held
+            # open for the whole video -- one SoundFile, not one per clip.
+            full_wav = video_dir / "full.wav"
+            source_reader = (
+                open_files.enter_context(sf.SoundFile(full_wav))
+                if full_wav.exists()
+                else None
+            )
+
             with open(committed_path, "a", encoding="utf-8") as committed_file:
                 for row in read_review_csv(review_path):
                     clip_id = row["clip_id"]
@@ -119,12 +134,28 @@ def commit_reviewed_clips(
 
                     dataset_id = f"yt_{video_id}_{clip_id}"
                     # opens the metadata file and creates target/wavs, so it has
-                    # to happen before the copy below
+                    # to happen before the write below
                     metadata_file = metadata_file_for(target)
-                    shutil.copy(
-                        video_dir / "clips" / f"{clip_id}.wav",
-                        target / "wavs" / f"{dataset_id}.wav",
-                    )
+                    out_wav = target / "wavs" / f"{dataset_id}.wav"
+
+                    if source_reader is not None:
+                        start_sec = float(row["start_sec"])
+                        end_sec = float(row["end_sec"])
+                        frame_count = write_slice_from(
+                            source_reader, out_wav, start_sec, end_sec
+                        )
+                        if frame_count == 0:
+                            # bounds clamp to zero frames -- a 0-frame wav
+                            # would fail downstream preprocessing far from the
+                            # cause, so skip the row instead of leaving it
+                            out_wav.unlink()
+                            continue
+                    else:
+                        pre_cut_clip = video_dir / "clips" / f"{clip_id}.wav"
+                        if not pre_cut_clip.exists():
+                            continue
+                        shutil.copy(pre_cut_clip, out_wav)
+
                     metadata_file.write(f"{dataset_id}|{row['text']}\n")
                     metadata_file.flush()
                     committed_file.write(f"{clip_id}|{dataset_id}\n")

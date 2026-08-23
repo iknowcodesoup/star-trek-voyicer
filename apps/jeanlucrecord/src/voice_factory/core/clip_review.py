@@ -88,6 +88,7 @@ def clip_from_row(row: dict) -> dict:
         "start_sec": parse_optional_float(row.get("start_sec")),
         "end_sec": parse_optional_float(row.get("end_sec")),
         "text": row.get("text", ""),
+        "excluded_reason": row.get("excluded_reason") or "",
     }
 
 

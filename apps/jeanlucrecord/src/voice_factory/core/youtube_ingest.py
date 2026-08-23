@@ -4,6 +4,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from voice_factory.repositories.video_meta_repository import (
     META_FILENAME,
@@ -185,45 +186,79 @@ def transcribe(
     return results
 
 
-def chunk_clips(
-    wav_path: Path,
+PAD_BEFORE_SEC = 0.15
+PAD_AFTER_SEC = 0.35
+
+# A clip padded down to nothing, or a music/silence passage padded up to
+# nothing, both still need a floor and a ceiling -- otherwise a 300s segment
+# that fails the duration filter would be retained anyway.
+RETAIN_FLOOR_SEC = 0.3
+RETAIN_CEILING_SEC = 60.0
+
+ExcludedReason = Literal["", "too_short", "too_long", "low_quality", "no_single_speaker"]
+
+
+def plan_clips(
+    media_duration_sec: float,
     segments: list[dict],
-    clips_dir: Path,
     min_duration: float = 1.0,
     max_duration: float = 30.0,
 ) -> list[dict]:
-    """Cut clips at segment boundaries into clips_dir/clip_NNNN.wav, dropping
-    segments outside [min_duration, max_duration] before ever cutting them.
-    Skips the ffmpeg cut if the clip already exists (resumable). Returns
-    metadata for surviving clips only."""
-    clips_dir.mkdir(parents=True, exist_ok=True)
+    """Plan clip boundaries from transcript segments -- pure metadata, no
+    ffmpeg, no filesystem. Cutting is deferred to commit time (see
+    core/review_workflow.py), so this only has to get the numbers right.
 
+    Padding is applied after the duration filter runs on each segment's
+    *unpadded* span, so tuning PAD_BEFORE_SEC/PAD_AFTER_SEC never shifts
+    which segments pass the filter or which clip_id a surviving segment gets
+    -- clip_id is the transcript index, not a count of survivors.
+
+    Segments outside [min_duration, max_duration] are retained as keep=0
+    rows with excluded_reason set, instead of being dropped outright: a short
+    interjection is often the cleanest audio in the video and was previously
+    unrecoverable once cut. RETAIN_FLOOR_SEC/RETAIN_CEILING_SEC bound how far
+    that retention goes, so a multi-minute music passage still gets dropped.
+    """
     clips = []
     for i, seg in enumerate(segments):
-        duration = seg["end"] - seg["start"]
-        if duration < min_duration or duration > max_duration:
-            print(f"  Skipping segment {i + 1}: duration {duration:.1f}s out of bounds")
+        unpadded_duration = seg["end"] - seg["start"]
+        clip_id = f"clip_{i + 1:04d}"
+
+        excluded_reason: ExcludedReason = ""
+        if unpadded_duration < min_duration:
+            excluded_reason = "too_short"
+        elif unpadded_duration > max_duration:
+            excluded_reason = "too_long"
+
+        if excluded_reason and not (
+            RETAIN_FLOOR_SEC <= unpadded_duration <= RETAIN_CEILING_SEC
+        ):
+            print(
+                f"  Dropping segment {i + 1}: duration {unpadded_duration:.1f}s "
+                "outside the retention bounds"
+            )
             continue
 
-        clip_id = f"clip_{i + 1:04d}"
-        clip_path = clips_dir / f"{clip_id}.wav"
-        if not clip_path.exists():
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", str(wav_path),
-                    "-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}",
-                    "-ar", str(TARGET_RATE), "-ac", "1", "-c:a", "pcm_s16le",
-                    str(clip_path),
-                ],
-                check=True,
-            )
+        start = max(0.0, seg["start"] - PAD_BEFORE_SEC)
+        end = min(media_duration_sec, seg["end"] + PAD_AFTER_SEC)
+
+        # Clamp into the gap to each neighbour, never past its midpoint --
+        # otherwise an unclamped pad on a diarized video reaches into the
+        # next speaker's first phoneme and that clip becomes cross-talk.
+        if i > 0:
+            gap_start_midpoint = (segments[i - 1]["end"] + seg["start"]) / 2
+            start = max(start, gap_start_midpoint)
+        if i + 1 < len(segments):
+            gap_end_midpoint = (seg["end"] + segments[i + 1]["start"]) / 2
+            end = min(end, gap_end_midpoint)
 
         clips.append({
             "clip_id": clip_id,
-            "start": seg["start"],
-            "end": seg["end"],
-            "duration": duration,
+            "start": start,
+            "end": end,
+            "duration": end - start,
             "text": seg["text"],
+            "excluded_reason": excluded_reason,
         })
 
     return clips
