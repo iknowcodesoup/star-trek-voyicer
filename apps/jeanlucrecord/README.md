@@ -184,6 +184,7 @@ just serve-jeanlucrecord        # http://127.0.0.1:8100
 | `GET` | `/jobs/{id}/logs?offset=` | tail a job's output from a byte offset |
 | `DELETE` | `/jobs/{id}` | cancel, and stop the container |
 | `GET` | `/videos` | every ingested video, independent of any character |
+| `DELETE` | `/videos/{video_id}` | delete a video's directory: audio, clips, review.csv |
 | `GET` | `/videos/{video_id}/speakers` | speaker labels and clip counts for one video |
 | `GET` | `/videos/{video_id}/clips` | `review.csv` as JSON |
 | `PATCH` | `/videos/{video_id}/clips` | set `keep` and `speaker_label` |

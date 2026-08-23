@@ -59,7 +59,8 @@ def resolve_video_meta(url: str) -> dict:
     result = subprocess.run(
         [
             sys.executable, "-m", "yt_dlp", "--skip-download",
-            "--print", "%(.{id,title,duration,channel,uploader,webpage_url})j",
+            "--print",
+            "%(.{id,title,duration,channel,uploader,webpage_url,thumbnail})j",
             url,
         ],
         capture_output=True, text=True, check=True,
@@ -78,6 +79,7 @@ def resolve_video_meta(url: str) -> dict:
         "title": entry.get("title") or video_id,
         "duration_sec": entry.get("duration"),
         "channel": entry.get("channel") or entry.get("uploader"),
+        "thumbnail_url": entry.get("thumbnail"),
         "url": entry.get("webpage_url")
         or f"https://www.youtube.com/watch?v={video_id}",
     }
@@ -124,7 +126,10 @@ def download_audio(url: str, out_wav: Path) -> Path:
     with tempfile.TemporaryDirectory(prefix="yt-dl-") as dl_dir:
         raw_template = str(Path(dl_dir) / "raw.%(ext)s")
         subprocess.run(
-            [sys.executable, "-m", "yt_dlp", "-f", "bestaudio", "-o", raw_template, url],
+            [
+                sys.executable, "-m", "yt_dlp", "-f", "bestaudio",
+                "-o", raw_template, url,
+            ],
             check=True,
         )
 

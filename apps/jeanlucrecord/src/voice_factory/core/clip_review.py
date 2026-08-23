@@ -70,6 +70,7 @@ def video_summary(video_directory: Path) -> dict:
         "url": meta.get("url"),
         "duration_sec": meta.get("duration_sec"),
         "channel": meta.get("channel"),
+        "thumbnail_url": meta.get("thumbnail_url"),
         "ingested_at": meta.get("ingested_at"),
     }
 

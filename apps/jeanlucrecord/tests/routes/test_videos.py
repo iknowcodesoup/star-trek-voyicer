@@ -118,6 +118,23 @@ def test_patch_video_rejects_a_blank_title(client, work_dir):
     assert client.patch("/videos/vid1", json={"title": ""}).status_code == 422
 
 
+def test_delete_video_removes_its_directory(client, work_dir):
+    video_dir = build_video(work_dir, "vid1", [row("clip_0001")])
+    assert video_dir.exists()
+
+    response = client.delete("/videos/vid1")
+
+    assert response.status_code == 204
+    assert not video_dir.exists()
+    assert client.get("/videos").json()["videos"] == []
+
+
+def test_delete_video_404s_for_an_unknown_video(client, work_dir):
+    response = client.delete("/videos/nope")
+
+    assert response.status_code == 404
+
+
 def test_patch_clips_writes_through_to_review_csv(client, work_dir):
     build_video(work_dir, "vid1", [row("clip_0001")])
 
@@ -251,6 +268,7 @@ def test_list_videos_reports_diarization_and_review_status(client, work_dir):
         "url",
         "duration_sec",
         "channel",
+        "thumbnail_url",
         "ingested_at",
     }
     assert videos["vid1"]["diarized"] is True

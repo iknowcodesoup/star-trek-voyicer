@@ -273,10 +273,12 @@ def stage_youtube_download(url: str) -> None:
     download -- every later step notices the audio changed under it.
     """
     video_dir = video_dir_for(url)
-    full_wav = download_audio(url, video_dir / FULL_WAV_NAME)
-    # the first step that has a directory to write into, so this is where the
-    # video records who it is for every character that later claims it
+    # Before the download, not after: the download is the longest step here and
+    # the one most likely to fail. Writing the name first means a video that is
+    # still downloading, or whose download died, still lists under its title
+    # rather than under the raw id.
     ensure_video_meta(url, video_dir)
+    full_wav = download_audio(url, video_dir / FULL_WAV_NAME)
     print(f"Audio ready at {full_wav}")
 
 

@@ -6,6 +6,7 @@ the clip routes below, all keyed on video_id alone.
 """
 
 import json
+import shutil
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
@@ -75,6 +76,18 @@ async def patch_video(video_id: str, rename_request: VideoRenameRequest) -> dict
         video_directory, {**meta, "title": rename_request.title}
     )
     return clip_review.video_summary(video_directory)
+
+
+@router.delete("/videos/{video_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_video(video_id: str) -> None:
+    """Remove one video's directory: its audio, clips, and review.csv.
+
+    Irreversible - there is no trash. clip_review.video_dir already checks the
+    id is filesystem-safe and 404s when the video does not exist, so this is
+    the delete counterpart of every route above that reads through it.
+    """
+    video_directory = clip_review.video_dir(video_id)
+    shutil.rmtree(video_directory)
 
 
 @router.get("/videos/{video_id}/speakers")
