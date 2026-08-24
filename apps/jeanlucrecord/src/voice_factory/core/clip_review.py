@@ -75,10 +75,21 @@ def video_summary(video_directory: Path) -> dict:
     }
 
 
+def keep_from_cell(value: str) -> bool | None:
+    """"1"/"0"/"" -> True/False/None. Empty is unreviewed -- neither kept nor
+    excluded -- and distinct from an old review.csv's "0", which still means
+    a human (or the length/quality/diarization heuristic) rejected it."""
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    return None
+
+
 def clip_from_row(row: dict) -> dict:
     return {
         "clip_id": row["clip_id"],
-        "keep": row["keep"] == "1",
+        "keep": keep_from_cell(row["keep"]),
         "quality_score": parse_optional_float(row.get("quality_score")),
         "flagged": row.get("flagged") == "1",
         "speaker_label": row.get("speaker_label") or None,

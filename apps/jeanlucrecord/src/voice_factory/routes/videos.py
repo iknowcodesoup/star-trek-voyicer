@@ -237,7 +237,7 @@ async def patch_clips(video_id: str, decisions_request: ClipDecisionRequest) -> 
     for decision in decisions_request.decisions:
         row = by_clip_id[decision.clip_id]
         if decision.keep is not None:
-            row["keep"] = "1" if decision.keep else "0"
+            row["keep"] = {"kept": "1", "excluded": "0", "none": ""}[decision.keep]
         if decision.speaker_label is not None:
             row["speaker_label"] = decision.speaker_label
         if decision.assigned_voice is not None:

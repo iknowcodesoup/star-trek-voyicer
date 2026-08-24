@@ -145,7 +145,7 @@ def test_patch_clips_writes_through_to_review_csv(client, work_dir):
 
     response = client.patch(
         "/videos/vid1/clips",
-        json={"decisions": [{"clip_id": "clip_0001", "keep": False}]},
+        json={"decisions": [{"clip_id": "clip_0001", "keep": "excluded"}]},
     )
 
     assert response.status_code == 200
@@ -163,7 +163,7 @@ def test_patch_clips_allows_repeated_keep_toggling(client, work_dir):
     blocked -- only a speaker_label reassignment is guarded (see below)."""
     build_video(work_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")])
 
-    for keep in (False, True, False, True):
+    for keep in ("excluded", "kept", "excluded", "kept"):
         response = client.patch(
             "/videos/vid1/clips",
             json={"decisions": [{"clip_id": "clip_0001", "keep": keep}]},
@@ -172,6 +172,30 @@ def test_patch_clips_allows_repeated_keep_toggling(client, work_dir):
 
     clips = client.get("/videos/vid1/clips").json()["clips"]
     assert clips[0]["keep"] is True
+
+
+def test_patch_clips_none_clears_keep_back_to_unreviewed(client, work_dir):
+    """A reviewer deselecting an already-chosen kept/excluded state must land
+    back on unreviewed, not on the opposite of what they had -- that is what
+    lets the review UI treat the third click on a toggle as "undo", not
+    "flip"."""
+    build_video(work_dir, "vid1", [row("clip_0001")])
+
+    response = client.patch(
+        "/videos/vid1/clips",
+        json={"decisions": [{"clip_id": "clip_0001", "keep": "kept"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["keep"] is True
+
+    response = client.patch(
+        "/videos/vid1/clips",
+        json={"decisions": [{"clip_id": "clip_0001", "keep": "none"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["keep"] is None
+    clips = client.get("/videos/vid1/clips").json()["clips"]
+    assert clips[0]["keep"] is None
 
 
 def test_patch_clips_rejects_reassigning_an_already_labelled_clip(client, work_dir):

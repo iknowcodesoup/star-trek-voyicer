@@ -77,7 +77,10 @@ class Job(BaseModel):
 
 class ClipDecision(BaseModel):
     clip_id: str
-    keep: bool | None = None
+    # None means "don't touch". "kept"/"excluded" is the reviewer's call;
+    # "none" clears a clip back to unreviewed -- the third state a plain
+    # bool cannot reach, for a clip nobody has decided on yet.
+    keep: Literal["kept", "excluded", "none"] | None = None
     speaker_label: str | None = None
     # Who this one clip is for. Reassigning it is the reviewer's whole job, so
     # unlike speaker_label it is never a conflict. An empty string clears it.
