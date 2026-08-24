@@ -24,7 +24,9 @@ def build_video(youtube_dir: Path, video_id: str, rows: list[dict]) -> Path:
     return video_dir
 
 
-def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:
+def row(
+    clip_id: str, keep: str = "1", speaker_label: str = "", assigned_voice: str = ""
+) -> dict:
     return {
         "clip_id": clip_id,
         "keep": keep,
@@ -32,6 +34,7 @@ def row(clip_id: str, keep: str = "1", speaker_label: str = "") -> dict:
         "flagged": 0,
         "speaker_label": speaker_label,
         "speaker_coverage": 1.0,
+        "assigned_voice": assigned_voice,
         "duration_sec": 3.0,
         "start_sec": 0.0,
         "end_sec": 3.0,
@@ -108,6 +111,41 @@ def test_speaker_map_routes_clips_to_separate_characters(tmp_path):
     assert result.committed_by_target == {
         dataset_dir_for("janeway"): 1,
         dataset_dir_for("chakotay"): 1,
+    }
+
+
+def test_assigned_voice_pin_overrides_the_speaker_map(tmp_path):
+    """A clip's own assigned_voice is the reviewer's answer for that one
+    clip, set independently of the diarized speaker_label it inherited --
+    it must win even when its group is mapped to someone else."""
+    youtube_dir = tmp_path / "youtube"
+    video_dir = build_video(
+        youtube_dir,
+        "vid1",
+        [
+            row("clip_0001", speaker_label="SPEAKER_00"),
+            row("clip_0002", speaker_label="SPEAKER_00", assigned_voice="tuvok"),
+        ],
+    )
+    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
+    work_dir = tmp_path / "work"
+
+    def dataset_dir_for(character: str) -> Path:
+        return work_dir / character / "dataset"
+
+    result = commit_reviewed_clips(
+        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
+    )
+
+    assert read_metadata(dataset_dir_for("janeway")) == [
+        "yt_vid1_clip_0001|line for clip_0001"
+    ]
+    assert read_metadata(dataset_dir_for("tuvok")) == [
+        "yt_vid1_clip_0002|line for clip_0002"
+    ]
+    assert result.committed_by_target == {
+        dataset_dir_for("janeway"): 1,
+        dataset_dir_for("tuvok"): 1,
     }
 
 

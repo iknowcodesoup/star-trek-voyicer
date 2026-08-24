@@ -73,16 +73,18 @@ def diarizer_python() -> Path:
     )
 
 
-def assign_speakers(
-    clips: list[dict],
-    turns: list[dict],
-    min_coverage: float = MIN_SPEAKER_COVERAGE,
-) -> list[dict]:
+def assign_speakers(clips: list[dict], turns: list[dict]) -> list[dict]:
     """Label each clip with the speaker who covers most of it.
 
-    Returns new dicts with "speaker_label" and "speaker_coverage" added. A label
-    of None means the clip is rejected: no single speaker holds min_coverage of
-    it. Pure -- no I/O, so the rejection rule is unit-testable on its own.
+    Returns new dicts with "speaker_label" and "speaker_coverage" added. The
+    label always names the best-covering speaker when any turn overlaps the
+    clip, however low the coverage -- a low-confidence measurement is still a
+    measurement, and the human reviewing the clip decides what to do with it.
+    A label of None means there was nothing to measure: no turn overlaps the
+    clip at all (silence or music). There is no coverage threshold here;
+    callers that need a keep/reject default read speaker_coverage against
+    MIN_SPEAKER_COVERAGE (or their own threshold) themselves. Pure -- no I/O,
+    so the measurement is unit-testable on its own.
     """
     labelled = []
     for clip in clips:
@@ -109,17 +111,28 @@ def assign_speakers(
         labelled.append(
             {
                 **clip,
-                "speaker_label": speaker if coverage >= min_coverage else None,
+                "speaker_label": speaker,
                 "speaker_coverage": coverage,
             }
         )
     return labelled
 
 
-def count_by_speaker(clips: list[dict]) -> dict[str, int]:
-    """Clip counts per speaker label, for the ingest summary. Rejected clips
-    (speaker_label None) are counted under the key "rejected"."""
+def count_by_speaker(
+    clips: list[dict], min_coverage: float = MIN_SPEAKER_COVERAGE
+) -> dict[str, int]:
+    """Clip counts per speaker label, for the ingest summary.
+
+    A clip with no overlapping turn (speaker_label None), or one whose best
+    speaker falls short of min_coverage, is counted under "rejected" -- this
+    is a summary bucket only, the row itself keeps its measured label.
+    """
     counts: dict[str, int] = defaultdict(int)
     for clip in clips:
-        counts[clip.get("speaker_label") or "rejected"] += 1
+        label = clip.get("speaker_label")
+        coverage = clip.get("speaker_coverage") or 0.0
+        if label and coverage >= min_coverage:
+            counts[label] += 1
+        else:
+            counts["rejected"] += 1
     return dict(sorted(counts.items()))

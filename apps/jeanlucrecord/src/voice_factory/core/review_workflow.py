@@ -128,7 +128,9 @@ def commit_reviewed_clips(
                     if row["keep"] != "1":
                         continue
 
-                    target = _resolve_target(row, out_dir, speaker_targets)
+                    target = _resolve_target(
+                        row, out_dir, speaker_targets, dataset_dir_for
+                    )
                     if target is None:
                         continue
 
@@ -255,7 +257,17 @@ def _resolve_target(
     row: dict,
     out_dir: Path | None,
     speaker_targets: dict[str, Path] | None,
+    dataset_dir_for: Callable[[str], Path] | None,
 ) -> Path | None:
+    # assigned_voice is the reviewer's own answer for this one clip, set
+    # independently of speaker_label (see review_csv_repository.py). It
+    # always wins over the speaker-label group the clip was diarized into --
+    # that is the whole point of letting one clip diverge from a group that
+    # is otherwise routed, or left unrouted, together.
+    assigned_voice = row.get("assigned_voice")
+    if assigned_voice and dataset_dir_for is not None:
+        return dataset_dir_for(assigned_voice)
+
     # None means no map at all -- the pre-diarization behaviour, send
     # everything to out_dir. An empty dict is different: it means a map
     # exists and every speaker in it was explicitly discarded (mapped to

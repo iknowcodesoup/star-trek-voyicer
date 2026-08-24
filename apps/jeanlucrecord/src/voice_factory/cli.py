@@ -355,10 +355,10 @@ def stage_youtube_diarize(
         video_dir / DIARIZATION_NAME,
         num_speakers=num_speakers,
     )
-    clips = assign_speakers(_require_clips(video_dir), turns, min_speaker_coverage)
+    clips = assign_speakers(_require_clips(video_dir), turns)
     write_json(video_dir / CLIPS_NAME, clips)
     print("\nClips per speaker:")
-    for speaker_label, count in count_by_speaker(clips).items():
+    for speaker_label, count in count_by_speaker(clips, min_speaker_coverage).items():
         print(f"  {speaker_label:<12} {count}")
 
 
@@ -400,9 +400,15 @@ def stage_youtube_review(url: str, quality_flag_threshold: float) -> None:
                 if flagged:
                     excluded_reason = "low_quality"
             speaker_label = clip.get("speaker_label")
-            # a clip no single speaker owns is cross-talk or noise -- default it
-            # to keep=0 for the same reason a low quality score does
-            rejected_by_diarization = enable_diarization and speaker_label is None
+            speaker_coverage = clip.get("speaker_coverage", 0.0)
+            # a clip no single speaker covers well is cross-talk or noise --
+            # default it to keep=0 for the same reason a low quality score
+            # does, but the measured label/coverage still get written below so
+            # a reviewer can see (and override) what diarization found
+            rejected_by_diarization = (
+                enable_diarization
+                and (speaker_label is None or speaker_coverage < MIN_SPEAKER_COVERAGE)
+            )
             if rejected_by_diarization and not excluded_reason:
                 excluded_reason = "no_single_speaker"
             new_rows.append(

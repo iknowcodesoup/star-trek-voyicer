@@ -22,19 +22,23 @@ def test_clip_inside_one_turn_gets_that_speaker():
     assert result[0]["speaker_coverage"] == 1.0
 
 
-def test_clip_straddling_two_speakers_is_rejected():
-    # 2s clip split evenly, so neither speaker reaches the 0.9 default
+def test_clip_straddling_two_speakers_still_reports_the_dominant_one():
+    # 2s clip split evenly, so neither speaker reaches the 0.9 default -- the
+    # label is still reported so a reviewer can see and override it; only
+    # min_coverage-aware callers (review, count_by_speaker) treat this as
+    # rejected
     result = assign_speakers(
         [clip(4.0, 6.0)],
         [turn(0.0, 5.0, "SPEAKER_00"), turn(5.0, 10.0, "SPEAKER_01")],
     )
 
-    assert result[0]["speaker_label"] is None
+    assert result[0]["speaker_label"] == "SPEAKER_00"
     assert result[0]["speaker_coverage"] == 0.5
 
 
-def test_clip_with_no_covering_turn_is_rejected():
-    # the gap between turns is music or silence -- this is the VAD behaviour
+def test_clip_with_no_covering_turn_gets_no_label():
+    # the gap between turns is music or silence -- this is the VAD behaviour,
+    # and there is nothing to report because no turn overlaps at all
     result = assign_speakers(
         [clip(6.0, 8.0)],
         [turn(0.0, 5.0, "SPEAKER_00"), turn(9.0, 12.0, "SPEAKER_01")],
@@ -55,13 +59,15 @@ def test_dominant_speaker_wins_above_the_coverage_floor():
     assert result[0]["speaker_coverage"] == 0.95
 
 
-def test_min_coverage_is_configurable():
-    clips = [clip(4.0, 6.0)]
-    turns = [turn(0.0, 5.0, "SPEAKER_00"), turn(5.0, 10.0, "SPEAKER_01")]
+def test_count_by_speaker_min_coverage_is_configurable():
+    labelled = assign_speakers(
+        [clip(4.0, 6.0)],
+        [turn(0.0, 5.0, "SPEAKER_00"), turn(5.0, 10.0, "SPEAKER_01")],
+    )
 
-    relaxed = assign_speakers(clips, turns, min_coverage=0.5)
+    relaxed = count_by_speaker(labelled, min_coverage=0.5)
 
-    assert relaxed[0]["speaker_label"] == "SPEAKER_00"
+    assert relaxed == {"SPEAKER_00": 1}
 
 
 def test_coverage_never_exceeds_one_when_turns_overlap():
