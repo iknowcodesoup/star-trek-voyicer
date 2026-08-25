@@ -26,8 +26,8 @@ def test_build_command_needs_no_character_for_youtube_ingest_stages():
     assert command[command.index("--stage") + 1] == "youtube-download"
 
 
-def test_build_command_still_needs_a_character_for_youtube_commit():
+def test_build_command_still_needs_a_character_for_compile_dataset():
     with pytest.raises(HTTPException) as exc_info:
-        _build_command(JobRequest(stage="youtube-commit"))
+        _build_command(JobRequest(stage="compile-dataset"))
 
     assert exc_info.value.status_code == 422

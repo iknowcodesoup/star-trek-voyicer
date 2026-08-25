@@ -32,7 +32,7 @@ from voice_factory.core.quality import (
     is_flagged,
 )
 from voice_factory.core.resample import normalize_ref_wav, resample_dir
-from voice_factory.core.review_workflow import commit_reviewed_clips
+from voice_factory.core.review_workflow import compile_dataset_for
 from voice_factory.core.youtube_ingest import (
     CLIPS_NAME,
     DIARIZATION_NAME,
@@ -49,6 +49,10 @@ from voice_factory.core.youtube_ingest import (
 from voice_factory.core.youtube_search import (
     SEARCH_LIMIT_DEFAULT,
     search_videos,
+)
+from voice_factory.infrastructure.orchestrator_gateway import (
+    OrchestratorUnavailable,
+    fetch_dataset_clips,
 )
 from voice_factory.repositories.review_csv_repository import (
     REVIEW_CSV_NAME,
@@ -116,7 +120,7 @@ STAGES = [
     "youtube-chunk",
     "youtube-diarize",
     "youtube-review",
-    "youtube-commit",
+    "compile-dataset",
 ]
 
 
@@ -209,7 +213,7 @@ def external_source_marker(character: str) -> Path:
 
 def mark_external_source(character: str, note: str) -> None:
     # tells stage_dataset (Chatterbox synthesis) that this dataset was populated
-    # from real audio (import/youtube-commit), not the corpus, so a later
+    # from real audio (import/compile-dataset), not the corpus, so a later
     # --stage all/dataset shouldn't try to extend it with synthetic clips
     marker = external_source_marker(character)
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -440,9 +444,9 @@ def stage_youtube_review(url: str, quality_flag_threshold: float) -> None:
         )
     print(
         "Fetch clip audio from the review API to listen, edit the 'keep' column, "
-        "then run, for each character this video's clips should reach:"
+        "then assign clips to a voice. Training compiles the dataset itself:"
     )
-    print("  uv run jeanlucrecord <character> --stage youtube-commit")
+    print("  uv run jeanlucrecord <character> --stage compile-dataset")
 
 
 def stage_youtube_ingest(
@@ -463,8 +467,8 @@ def stage_youtube_ingest(
     same sequence for anyone who would rather type it once. No character is
     needed here: the artifacts land under a video id shared by every
     character, so a second character claiming this video skips straight to
-    stage_youtube_commit instead of repeating any of this. Nothing here
-    touches work/<character>/dataset/ -- see stage_youtube_commit.
+    review instead of repeating any of this. Nothing here touches
+    work/<character>/dataset/ -- see stage_compile_dataset.
     """
     video_dir = video_dir_for(url)
     review_path = video_dir / REVIEW_CSV_NAME
@@ -484,32 +488,46 @@ def stage_youtube_ingest(
     stage_youtube_review(url, quality_flag_threshold)
 
 
-def stage_youtube_commit(character: str) -> None:
-    # shared across every character now, so this scans every ingested video --
-    # not just ones this character happened to ingest -- and speaker_map.json
-    # decides which of them actually route clips here (see review.py)
+def stage_compile_dataset(character: str) -> None:
+    """Rebuild this character's dataset from every clip assigned to them.
+
+    Runs at the start of training, not at review time. The orchestrator says
+    which clips those are -- a voice is built from clips spread across many
+    videos, and the reviewer's decisions live in its database -- and this
+    replaces work/<character>/dataset/ rather than adding to it. So a clip
+    the reviewer has since un-kept or moved to another voice is gone from the
+    audio the next training run reads, with no un-merge step to get wrong.
+    """
     youtube_dir = APP_DIR / "work" / "youtube"
     if not youtube_dir.exists():
         raise SystemExit(f"No ingested YouTube videos found under {youtube_dir}")
-    out_dir = dataset_dir_for(character)
-    result = commit_reviewed_clips(youtube_dir, out_dir, dataset_dir_for)
 
-    # a diarized video routes clips to several characters, so mark every dataset
-    # that actually gained clips -- not just the character named on the command
-    # line. Missing one lets a later --stage all overlay Chatterbox synthesis on
-    # top of that character's real audio.
-    for target, count in sorted(result.committed_by_target.items()):
-        target_character = target.parent.name
-        mark_external_source(
-            target_character, f"{count} clip(s) committed from {youtube_dir}"
+    try:
+        dataset_clips = fetch_dataset_clips(character)
+    except OrchestratorUnavailable as error:
+        # Fatal, and early. Compiling against a guess would train the voice on
+        # the wrong audio, which nothing downstream would notice.
+        raise SystemExit(str(error)) from error
+
+    dataset_dir = dataset_dir_for(character)
+    result = compile_dataset_for(youtube_dir, dataset_dir, dataset_clips)
+
+    if result.clip_count == 0:
+        # an empty dataset makes preprocess fail several stages downstream,
+        # far from the real cause: nobody has assigned this voice any clips
+        raise SystemExit(
+            f"No kept clips are assigned to {character!r}. "
+            f"Assign clips to this voice in the review UI, then train again."
         )
-        if target != out_dir:
-            print(f"  {count} clip(s) -> {target_character}")
 
-    print(
-        f"Committed {result.newly_committed} new clip(s), "
-        f"{result.already_committed} already committed."
+    # tells stage_dataset this dataset holds real audio, so a later
+    # --stage all/dataset does not overlay Chatterbox synthesis on top of it
+    mark_external_source(
+        character, f"{result.clip_count} clip(s) compiled from {youtube_dir}"
     )
+    print(f"Compiled {result.clip_count} clip(s) into {dataset_dir}.")
+    if result.skipped_count:
+        print(f"Skipped {result.skipped_count} clip(s) with no usable audio.")
 
 
 def stage_resample(character: str) -> None:
@@ -884,7 +902,7 @@ def main() -> None:
     if args.stage == "youtube-search" and not args.search_query:
         parser.error("--stage youtube-search requires --search-query")
     # youtube-ingest and its five steps act on a video shared across every
-    # character, so none of them need one -- only youtube-commit and the
+    # character, so none of them need one -- only compile-dataset and the
     # character-only stages below do.
     if (
         args.stage not in ("youtube-search", *YOUTUBE_STAGES_NEEDING_URL)
@@ -929,8 +947,10 @@ def main() -> None:
         )
     if args.stage == "youtube-review":
         stage_youtube_review(args.youtube_url, args.quality_flag_threshold)
-    if args.stage == "youtube-commit":
-        stage_youtube_commit(args.character)
+    # deliberately not part of "all": that path builds dataset/ by Chatterbox
+    # synthesis (stage_dataset above), and this replaces the folder outright
+    if args.stage == "compile-dataset":
+        stage_compile_dataset(args.character)
     if args.stage in ("all", "resample"):
         stage_resample(args.character)
     if args.stage in ("all", "preprocess"):

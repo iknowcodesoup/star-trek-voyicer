@@ -35,7 +35,7 @@ Stage = Literal[
     "youtube-chunk",
     "youtube-diarize",
     "youtube-review",
-    "youtube-commit",
+    "compile-dataset",
     "resample",
     "preprocess",
     "smoketest",
@@ -110,9 +110,3 @@ class VideoRenameRequest(BaseModel):
 class SpeakerMapRequest(BaseModel):
     # speaker label -> character name. null discards that speaker's clips.
     speaker_map: dict[str, str | None]
-
-
-class CommitRequest(BaseModel):
-    # video_id -> {speaker_label: character}. A character of null discards
-    # that speaker's clips, same meaning as SpeakerMapRequest.
-    assignments: dict[str, dict[str, str | None]] = Field(min_length=1)

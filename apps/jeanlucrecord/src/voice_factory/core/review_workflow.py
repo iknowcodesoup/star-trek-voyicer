@@ -1,194 +1,174 @@
-"""Domain rules for committing reviewed clips and merging speaker maps.
+"""Domain rules for building a character's dataset and merging speaker maps.
 
-Calls into repositories/review_csv_repository.py and
-repositories/speaker_map_repository.py for the actual file I/O; owns the
-conflict-detection and commit-routing rules on top of it.
+Calls into repositories/speaker_map_repository.py for the actual file I/O;
+owns the conflict-detection and routing rules on top of it.
+
+compile_dataset_for is the one path that builds training audio. It rebuilds
+work/<character>/dataset/ from scratch on every call, out of whatever the
+orchestrator currently says the voice is made of, so the folder is always
+exactly the reviewer's live set of decisions. That is what removes the delete
+paths an incremental merge would need: un-keeping a clip, un-assigning it, or
+moving it to another voice all take effect by simply not being gathered on
+the next compile.
+
+The decisions themselves are not here any more. They live in the
+orchestrator's Postgres, and this host owns the audio - see
+infrastructure/orchestrator_gateway.py. So a compile is told which slices to
+cut rather than scanning for them.
 """
 
 import shutil
-from collections.abc import Callable
-from contextlib import ExitStack
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import NamedTuple
 
 import soundfile as sf
 
 from voice_factory.core.audio_slicing import write_slice_from
-from voice_factory.repositories.review_csv_repository import (
-    REVIEW_CSV_NAME,
-    read_review_csv,
-)
 from voice_factory.repositories.speaker_map_repository import (
-    SPEAKER_MAP_FILENAME,
     read_speaker_map,
     write_speaker_map_file,
 )
 
 
-class CommitResult(NamedTuple):
-    newly_committed: int
-    already_committed: int
-    # how many clips each dataset directory gained -- callers need this to mark
-    # every character that received clips, not just the primary one
-    committed_by_target: dict[Path, int]
+class CompileResult(NamedTuple):
+    """What one compile pass wrote into work/<character>/dataset/."""
+
+    clip_count: int
+    # rows skipped because their bounds clamp to zero frames, or because the
+    # video holds neither a full.wav to slice nor a pre-cut clip to copy. A
+    # caller reports this: a compile that silently drops half a dataset and
+    # still says "ok" is how a training run starts on the wrong audio.
+    skipped_count: int
 
 
-def load_committed(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    committed = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        clip_id, dataset_id = line.split("|", 1)
-        committed[clip_id] = dataset_id
-    return committed
+def clips_to_compile(
+    youtube_dir: Path, dataset_clips: list[dict]
+) -> list[tuple[Path, dict]]:
+    """Pair each assigned clip with the video directory holding its audio.
+
+    Returns (video_dir, clip) pairs in a stable order -- videos sorted by
+    directory name, clips by start time -- so two compiles of the same
+    decisions write the same metadata.csv byte for byte.
+
+    A clip whose video directory is gone is left out. That is an operator who
+    reclaimed the disk, not a corrupt dataset, and the caller reports it as a
+    skip rather than failing the whole compile.
+    """
+    gathered: list[tuple[Path, dict]] = []
+    for clip in dataset_clips:
+        video_dir = youtube_dir / str(clip["video_id"])
+        if not video_dir.exists():
+            continue
+        gathered.append((video_dir, clip))
+    gathered.sort(key=lambda pair: (pair[0].name, float(pair[1]["start_sec"])))
+    return gathered
 
 
-def commit_reviewed_clips(
+def compile_dataset_for(
     youtube_dir: Path,
-    out_dir: Path | None = None,
-    dataset_dir_for: Callable[[str], Path] | None = None,
-) -> CommitResult:
-    """Merge keep=1 rows from every work/<character>/youtube/<video_id>/review.csv
-    into a dataset directory, skipping rows already recorded in that video's
-    committed.csv ledger.
+    dataset_dir: Path,
+    dataset_clips: list[dict],
+) -> CompileResult:
+    """Rebuild dataset_dir from the clips the orchestrator says to use.
 
-    dataset_dir_for resolves a character name to that character's dataset
-    directory. Supply it to honour each video's speaker_map.json, so one diarized
-    video can seed several characters at once. None sends every clip to out_dir,
-    which is the behaviour from before diarization existed.
+    dataset_clips arrives already filtered to kept and assigned, so this only
+    turns decisions into audio. Passing it in rather than fetching it here is
+    what keeps the file work testable with no HTTP in the way - and it is why
+    the voice's name is no longer a parameter: the caller resolved the name
+    into clips before getting here.
 
-    out_dir is the fallback destination for a clip with no single mapped
-    character: an unmapped video (dataset_dir_for is None), an undiarized row,
-    or a speaker absent from its video's map. Pass None to skip those clips
-    instead of guessing -- the batched, multi-character commit route has no
-    one "committing character" to fall back to, so a guess there would risk
-    routing a clip to the wrong dataset.
+    Destructive by design: dataset_dir/wavs/ and dataset_dir/metadata.csv are
+    replaced, not appended to. Anything the reviewer has since un-kept or
+    reassigned disappears because it is not gathered, which is the whole
+    reason this runs at training start rather than at assignment time.
 
-    The map is read per video, because SPEAKER_00 in one video is not the same
-    person as SPEAKER_00 in the next. A labelled clip whose speaker is absent
-    from its video's map stays uncommitted, so a later run with a corrected map
-    can still pick it up.
+    Written to a sibling directory and swapped in at the end, so a crash or a
+    read error partway through leaves the previous dataset intact rather than
+    a half-built one a training run would happily read.
     """
-    if out_dir is not None:
-        (out_dir / "wavs").mkdir(parents=True, exist_ok=True)
+    rows = clips_to_compile(youtube_dir, dataset_clips)
 
-    newly_committed = 0
-    already_committed = 0
-    committed_by_target: dict[Path, int] = {}
+    staging_dir = dataset_dir.with_name(dataset_dir.name + ".compiling")
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    (staging_dir / "wavs").mkdir(parents=True)
 
-    with ExitStack() as open_files:
-        metadata_files: dict[Path, TextIO] = {}
+    clip_count = 0
+    skipped_count = 0
+    metadata_lines: list[str] = []
 
-        def metadata_file_for(target: Path) -> TextIO:
-            if target not in metadata_files:
-                (target / "wavs").mkdir(parents=True, exist_ok=True)
-                metadata_files[target] = open_files.enter_context(
-                    open(target / "metadata.csv", "a", encoding="utf-8")
+    # group by video so each video's full.wav opens once, not once per clip
+    for video_dir in _ordered_video_dirs(rows):
+        video_rows = [row for source_dir, row in rows if source_dir == video_dir]
+        # full.wav wins over a stale pre-cut clips/{id}.wav: a trim only ever
+        # changes review.csv's bounds, and the old cut would outlive it under
+        # the reverse precedence
+        full_wav = video_dir / "full.wav"
+        source_reader = sf.SoundFile(full_wav) if full_wav.exists() else None
+        try:
+            for row in video_rows:
+                written = _write_clip(
+                    video_dir, row, staging_dir, source_reader
                 )
-            return metadata_files[target]
+                if written is None:
+                    skipped_count += 1
+                    continue
+                metadata_lines.append(written)
+                clip_count += 1
+        finally:
+            if source_reader is not None:
+                source_reader.close()
 
-        for video_dir in sorted(youtube_dir.glob("*")):
-            review_path = video_dir / REVIEW_CSV_NAME
-            if not review_path.exists():
-                continue
-            video_id = video_dir.name
-            speaker_targets = load_speaker_targets(video_dir, dataset_dir_for)
+    (staging_dir / "metadata.csv").write_text(
+        "".join(metadata_lines), encoding="utf-8"
+    )
 
-            # dataset_dir_for is only ever omitted by tests exercising the
-            # no-routing case. Every real caller (stage_youtube_commit) passes
-            # it, and youtube_dir is shared across every character since this
-            # story, so a video with no speaker_map.json here is unclaimed --
-            # not "assume it's mine" the way a character-scoped scan used to
-            # read it. Skipping before touching committed.csv is what keeps
-            # this commit run from marking someone else's clips as handled.
-            if dataset_dir_for is not None and speaker_targets is None:
-                continue
-
-            committed_path = video_dir / "committed.csv"
-            committed = load_committed(committed_path)
-
-            # full.wav wins whenever it exists, even over a stale pre-cut
-            # clips/{id}.wav from before this story: every trim a reviewer
-            # makes only ever changes review.csv's bounds, and the old cut
-            # would silently outlive it under the reverse precedence. Held
-            # open for the whole video -- one SoundFile, not one per clip.
-            full_wav = video_dir / "full.wav"
-            source_reader = (
-                open_files.enter_context(sf.SoundFile(full_wav))
-                if full_wav.exists()
-                else None
-            )
-
-            with open(committed_path, "a", encoding="utf-8") as committed_file:
-                for row in read_review_csv(review_path):
-                    clip_id = row["clip_id"]
-                    if clip_id in committed:
-                        already_committed += 1
-                        continue
-                    if row["keep"] != "1":
-                        continue
-
-                    target = _resolve_target(
-                        row, out_dir, speaker_targets, dataset_dir_for
-                    )
-                    if target is None:
-                        continue
-
-                    dataset_id = f"yt_{video_id}_{clip_id}"
-                    # opens the metadata file and creates target/wavs, so it has
-                    # to happen before the write below
-                    metadata_file = metadata_file_for(target)
-                    out_wav = target / "wavs" / f"{dataset_id}.wav"
-
-                    if source_reader is not None:
-                        start_sec = float(row["start_sec"])
-                        end_sec = float(row["end_sec"])
-                        frame_count = write_slice_from(
-                            source_reader, out_wav, start_sec, end_sec
-                        )
-                        if frame_count == 0:
-                            # bounds clamp to zero frames -- a 0-frame wav
-                            # would fail downstream preprocessing far from the
-                            # cause, so skip the row instead of leaving it
-                            out_wav.unlink()
-                            continue
-                    else:
-                        pre_cut_clip = video_dir / "clips" / f"{clip_id}.wav"
-                        if not pre_cut_clip.exists():
-                            continue
-                        shutil.copy(pre_cut_clip, out_wav)
-
-                    metadata_file.write(f"{dataset_id}|{row['text']}\n")
-                    metadata_file.flush()
-                    committed_file.write(f"{clip_id}|{dataset_id}\n")
-                    committed_file.flush()
-                    newly_committed += 1
-                    committed_by_target[target] = committed_by_target.get(target, 0) + 1
-
-    return CommitResult(newly_committed, already_committed, committed_by_target)
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+    dataset_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir.replace(dataset_dir)
+    return CompileResult(clip_count, skipped_count)
 
 
-def load_speaker_targets(
+def _ordered_video_dirs(rows: list[tuple[Path, dict]]) -> list[Path]:
+    """The video directories in rows, first-seen order, no duplicates."""
+    ordered: list[Path] = []
+    for video_dir, _row in rows:
+        if video_dir not in ordered:
+            ordered.append(video_dir)
+    return ordered
+
+
+def _write_clip(
     video_dir: Path,
-    dataset_dir_for: Callable[[str], Path] | None,
-) -> dict[str, Path] | None:
-    """Read video_dir/speaker_map.json into {speaker_label: dataset_dir}.
+    row: dict,
+    staging_dir: Path,
+    source_reader: sf.SoundFile | None,
+) -> str | None:
+    """Write one clip's wav into staging_dir. Returns its metadata.csv line,
+    or None when the row produced no usable audio."""
+    dataset_id = f"yt_{video_dir.name}_{row['clip_id']}"
+    out_wav = staging_dir / "wavs" / f"{dataset_id}.wav"
 
-    Returns None when there is no map to apply, which sends every clip to the
-    default destination. A speaker mapped to null is deliberately dropped: that
-    is how the reviewer says "discard this voice".
-    """
-    if dataset_dir_for is None:
-        return None
-    map_path = video_dir / SPEAKER_MAP_FILENAME
-    if not map_path.exists():
-        return None
-    speaker_map = read_speaker_map(video_dir)
-    return {
-        speaker_label: dataset_dir_for(character)
-        for speaker_label, character in speaker_map.items()
-        if character
-    }
+    if source_reader is not None:
+        frame_count = write_slice_from(
+            source_reader,
+            out_wav,
+            float(row["start_sec"]),
+            float(row["end_sec"]),
+        )
+        if frame_count == 0:
+            # bounds clamp to zero frames -- a 0-frame wav fails downstream
+            # preprocessing far from the cause, so drop the row instead
+            out_wav.unlink()
+            return None
+    else:
+        pre_cut_clip = video_dir / "clips" / f"{row['clip_id']}.wav"
+        if not pre_cut_clip.exists():
+            return None
+        shutil.copy(pre_cut_clip, out_wav)
+
+    return f"{dataset_id}|{row['text']}\n"
 
 
 class SpeakerMapConflict(Exception):
@@ -251,39 +231,3 @@ def write_speaker_map(video_dir: Path, speaker_map: dict[str, str | None]) -> Pa
         raise SpeakerMapConflict(conflicts)
     merged = {**existing, **speaker_map}
     return write_speaker_map_file(video_dir, merged)
-
-
-def _resolve_target(
-    row: dict,
-    out_dir: Path | None,
-    speaker_targets: dict[str, Path] | None,
-    dataset_dir_for: Callable[[str], Path] | None,
-) -> Path | None:
-    # assigned_voice is the reviewer's own answer for this one clip, set
-    # independently of speaker_label (see review_csv_repository.py). It
-    # always wins over the speaker-label group the clip was diarized into --
-    # that is the whole point of letting one clip diverge from a group that
-    # is otherwise routed, or left unrouted, together.
-    assigned_voice = row.get("assigned_voice")
-    if assigned_voice and dataset_dir_for is not None:
-        return dataset_dir_for(assigned_voice)
-
-    # None means no map at all -- the pre-diarization behaviour, send
-    # everything to out_dir. An empty dict is different: it means a map
-    # exists and every speaker in it was explicitly discarded (mapped to
-    # null), so falling back to out_dir here would be the same unsafe
-    # "assume it's mine" guess this story removes from the video-level scan
-    # above, just one row at a time instead of one video at a time.
-    #
-    # Either way, out_dir itself may now be None: the batched, multi-character
-    # commit route has no single "committing character" to fall back to, so it
-    # passes None here on purpose. Returning None is exactly what the caller
-    # already treats as "leave this row uncommitted".
-    if speaker_targets is None:
-        return out_dir
-    speaker_label = row.get("speaker_label")
-    if not speaker_label:
-        # an undiarized row in an otherwise mapped video -- the primary
-        # character is the only sensible destination, when there is one
-        return out_dir
-    return speaker_targets.get(speaker_label)

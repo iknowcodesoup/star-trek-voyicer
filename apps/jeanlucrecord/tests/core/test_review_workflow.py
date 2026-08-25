@@ -8,7 +8,8 @@ import soundfile as sf
 from voice_factory.core.audio_slicing import TARGET_RATE
 from voice_factory.core.review_workflow import (
     SpeakerMapConflict,
-    commit_reviewed_clips,
+    clips_for_character,
+    compile_dataset_for,
     write_speaker_map,
 )
 from voice_factory.repositories.review_csv_repository import write_review_csv
@@ -20,6 +21,19 @@ def build_video(youtube_dir: Path, video_id: str, rows: list[dict]) -> Path:
     clips_dir.mkdir(parents=True, exist_ok=True)
     for row in rows:
         (clips_dir / f"{row['clip_id']}.wav").write_bytes(b"RIFF-not-real-audio")
+    write_review_csv(video_dir / "review.csv", rows)
+    return video_dir
+
+
+def build_video_with_full_wav(
+    youtube_dir: Path, video_id: str, rows: list[dict], num_seconds: float = 10.0
+) -> Path:
+    """A video with full.wav present, no clips/*.wav -- the shape every
+    video takes once plan_clips replaces chunk_clips."""
+    video_dir = youtube_dir / video_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    ramp = np.arange(round(num_seconds * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
     write_review_csv(video_dir / "review.csv", rows)
     return video_dir
 
@@ -49,249 +63,335 @@ def read_metadata(dataset_dir: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def test_commit_without_a_map_keeps_the_original_behaviour(tmp_path):
+def wav_names(dataset_dir: Path) -> list[str]:
+    wavs_dir = dataset_dir / "wavs"
+    if not wavs_dir.exists():
+        return []
+    return sorted(path.name for path in wavs_dir.iterdir())
+
+
+# --- gathering: which clips a compile picks up ---------------------------
+
+
+def test_compile_gathers_only_kept_clips_assigned_to_this_character(tmp_path):
     youtube_dir = tmp_path / "youtube"
-    build_video(youtube_dir, "vid1", [row("clip_0001"), row("clip_0002", keep="0")])
-    out_dir = tmp_path / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert result.newly_committed == 1
-    assert result.already_committed == 0
-    assert read_metadata(out_dir) == ["yt_vid1_clip_0001|line for clip_0001"]
-    assert (out_dir / "wavs" / "yt_vid1_clip_0001.wav").exists()
-
-
-def test_commit_is_idempotent(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    build_video(youtube_dir, "vid1", [row("clip_0001")])
-    out_dir = tmp_path / "dataset"
-
-    commit_reviewed_clips(youtube_dir, out_dir)
-    second = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert second.newly_committed == 0
-    assert second.already_committed == 1
-    assert len(read_metadata(out_dir)) == 1
-
-
-def test_speaker_map_routes_clips_to_separate_characters(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    video_dir = build_video(
+    build_video(
         youtube_dir,
         "vid1",
         [
-            row("clip_0001", speaker_label="SPEAKER_00"),
-            row("clip_0002", speaker_label="SPEAKER_01"),
-            row("clip_0003", speaker_label="SPEAKER_02"),
+            row("clip_0001", assigned_voice="janeway"),
+            row("clip_0002", keep="0", assigned_voice="janeway"),
+            row("clip_0003", assigned_voice="chakotay"),
+            row("clip_0004"),
         ],
     )
-    write_speaker_map(
-        video_dir,
-        {"SPEAKER_00": "janeway", "SPEAKER_01": "chakotay", "SPEAKER_02": None},
-    )
-    work_dir = tmp_path / "work"
+    dataset_dir = tmp_path / "dataset"
 
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
 
-    result = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
+    assert result.clip_count == 1
+    assert read_metadata(dataset_dir) == ["yt_vid1_clip_0001|line for clip_0001"]
 
-    assert result.newly_committed == 2
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
+
+def test_compile_gathers_one_voice_across_several_videos(tmp_path):
+    """The whole reason a voice's dataset cannot be built per run: a voice is
+    made of clips spread over many videos."""
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")])
+    build_video(youtube_dir, "vid2", [row("clip_0002", assigned_voice="janeway")])
+    build_video(youtube_dir, "vid3", [row("clip_0003", assigned_voice="chakotay")])
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 2
+    assert wav_names(dataset_dir) == [
+        "yt_vid1_clip_0001.wav",
+        "yt_vid2_clip_0002.wav",
     ]
-    assert read_metadata(dataset_dir_for("chakotay")) == [
-        "yt_vid1_clip_0002|line for clip_0002"
-    ]
-    # SPEAKER_02 mapped to null, so it is discarded
-    assert read_metadata(dataset_dir_for("tuvok")) == []
-    assert result.committed_by_target == {
-        dataset_dir_for("janeway"): 1,
-        dataset_dir_for("chakotay"): 1,
-    }
 
 
-def test_assigned_voice_pin_overrides_the_speaker_map(tmp_path):
-    """A clip's own assigned_voice is the reviewer's answer for that one
-    clip, set independently of the diarized speaker_label it inherited --
-    it must win even when its group is mapped to someone else."""
+def test_compile_ignores_the_speaker_map(tmp_path):
+    """assigned_voice is the only thing that routes a clip into a dataset.
+    speaker_map.json answers who diarization heard, which is a different
+    question from who the clip is for."""
     youtube_dir = tmp_path / "youtube"
     video_dir = build_video(
-        youtube_dir,
-        "vid1",
-        [
-            row("clip_0001", speaker_label="SPEAKER_00"),
-            row("clip_0002", speaker_label="SPEAKER_00", assigned_voice="tuvok"),
-        ],
-    )
-    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    result = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
-
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
-    ]
-    assert read_metadata(dataset_dir_for("tuvok")) == [
-        "yt_vid1_clip_0002|line for clip_0002"
-    ]
-    assert result.committed_by_target == {
-        dataset_dir_for("janeway"): 1,
-        dataset_dir_for("tuvok"): 1,
-    }
-
-
-def test_unmapped_speaker_stays_uncommittable_until_the_map_is_fixed(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    video_dir = build_video(
-        youtube_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_07")]
-    )
-    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    first = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
-    assert first.newly_committed == 0
-
-    # correcting the map must let the clip through on the next run
-    write_speaker_map(video_dir, {"SPEAKER_07": "tuvok"})
-    second = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
-
-    assert second.newly_committed == 1
-    assert read_metadata(dataset_dir_for("tuvok")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
-    ]
-
-
-def test_each_video_uses_its_own_speaker_map(tmp_path):
-    # SPEAKER_00 in one video is a different person from SPEAKER_00 in the next
-    youtube_dir = tmp_path / "youtube"
-    first_video = build_video(
         youtube_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")]
     )
-    second_video = build_video(
-        youtube_dir, "vid2", [row("clip_0001", speaker_label="SPEAKER_00")]
-    )
-    write_speaker_map(first_video, {"SPEAKER_00": "janeway"})
-    write_speaker_map(second_video, {"SPEAKER_00": "tuvok"})
-    work_dir = tmp_path / "work"
+    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
+    dataset_dir = tmp_path / "dataset"
 
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
 
-    commit_reviewed_clips(youtube_dir, dataset_dir_for("janeway"), dataset_dir_for)
-
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
-    ]
-    assert read_metadata(dataset_dir_for("tuvok")) == [
-        "yt_vid2_clip_0001|line for clip_0001"
-    ]
+    assert result.clip_count == 0
+    assert read_metadata(dataset_dir) == []
 
 
-def test_undiarized_row_falls_back_to_the_primary_dataset(tmp_path):
+def test_compile_writes_an_empty_dataset_when_nothing_is_assigned(tmp_path):
     youtube_dir = tmp_path / "youtube"
-    video_dir = build_video(youtube_dir, "vid1", [row("clip_0001", speaker_label="")])
-    write_speaker_map(video_dir, {"SPEAKER_00": "chakotay"})
-    work_dir = tmp_path / "work"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="chakotay")])
+    dataset_dir = tmp_path / "dataset"
 
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
 
-    result = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
+    assert result.clip_count == 0
+    assert read_metadata(dataset_dir) == []
+    assert (dataset_dir / "wavs").is_dir()
+
+
+def test_compile_handles_a_youtube_dir_that_does_not_exist(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", tmp_path / "missing", dataset_dir)
+
+    assert result.clip_count == 0
+    assert (dataset_dir / "wavs").is_dir()
+
+
+def test_compile_skips_a_video_with_no_review_csv(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    (youtube_dir / "vid1").mkdir(parents=True)
+    build_video(youtube_dir, "vid2", [row("clip_0001", assigned_voice="janeway")])
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 1
+
+
+def test_clips_for_character_orders_videos_by_name(tmp_path):
+    """Two compiles of the same decisions must write the same metadata.csv."""
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid_b", [row("clip_0002", assigned_voice="janeway")])
+    build_video(youtube_dir, "vid_a", [row("clip_0001", assigned_voice="janeway")])
+
+    gathered = clips_for_character(youtube_dir, "janeway")
+
+    assert [video_dir.name for video_dir, _row in gathered] == ["vid_a", "vid_b"]
+
+
+# --- rebuild-from-scratch: what makes decisions reversible ---------------
+
+
+def test_compile_is_idempotent(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")])
+    dataset_dir = tmp_path / "dataset"
+
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+    first = read_metadata(dataset_dir)
+    second_result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert second_result.clip_count == 1
+    assert read_metadata(dataset_dir) == first
+    assert wav_names(dataset_dir) == ["yt_vid1_clip_0001.wav"]
+
+
+def test_un_keeping_a_clip_removes_it_from_the_next_compile(tmp_path):
+    """No delete path: the clip is gone because it was not gathered."""
+    youtube_dir = tmp_path / "youtube"
+    rows = [
+        row("clip_0001", assigned_voice="janeway"),
+        row("clip_0002", assigned_voice="janeway"),
+    ]
+    video_dir = build_video(youtube_dir, "vid1", rows)
+    dataset_dir = tmp_path / "dataset"
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    rows[0]["keep"] = "0"
+    write_review_csv(video_dir / "review.csv", rows)
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 1
+    assert wav_names(dataset_dir) == ["yt_vid1_clip_0002.wav"]
+    assert read_metadata(dataset_dir) == ["yt_vid1_clip_0002|line for clip_0002"]
+
+
+def test_clearing_a_clip_back_to_undecided_removes_it(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    rows = [row("clip_0001", assigned_voice="janeway")]
+    video_dir = build_video(youtube_dir, "vid1", rows)
+    dataset_dir = tmp_path / "dataset"
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    rows[0]["keep"] = ""
+    write_review_csv(video_dir / "review.csv", rows)
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 0
+    assert wav_names(dataset_dir) == []
+
+
+def test_reassigning_a_clip_moves_it_between_two_voices(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    rows = [row("clip_0001", assigned_voice="janeway")]
+    video_dir = build_video(youtube_dir, "vid1", rows)
+    janeway_dir = tmp_path / "janeway" / "dataset"
+    chakotay_dir = tmp_path / "chakotay" / "dataset"
+    compile_dataset_for("janeway", youtube_dir, janeway_dir)
+    assert wav_names(janeway_dir) == ["yt_vid1_clip_0001.wav"]
+
+    rows[0]["assigned_voice"] = "chakotay"
+    write_review_csv(video_dir / "review.csv", rows)
+    compile_dataset_for("janeway", youtube_dir, janeway_dir)
+    compile_dataset_for("chakotay", youtube_dir, chakotay_dir)
+
+    assert wav_names(janeway_dir) == []
+    assert wav_names(chakotay_dir) == ["yt_vid1_clip_0001.wav"]
+
+
+def test_compile_replaces_a_dataset_left_by_an_earlier_run(tmp_path):
+    """A wav no compile would produce must not survive into training."""
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")])
+    dataset_dir = tmp_path / "dataset"
+    (dataset_dir / "wavs").mkdir(parents=True)
+    (dataset_dir / "wavs" / "stale.wav").write_bytes(b"stale")
+    (dataset_dir / "metadata.csv").write_text("stale|stale line\n", encoding="utf-8")
+
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert wav_names(dataset_dir) == ["yt_vid1_clip_0001.wav"]
+    assert read_metadata(dataset_dir) == ["yt_vid1_clip_0001|line for clip_0001"]
+
+
+def test_compile_clears_a_staging_directory_left_by_a_crash(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")])
+    dataset_dir = tmp_path / "dataset"
+    staging_dir = dataset_dir.with_name("dataset.compiling")
+    (staging_dir / "wavs").mkdir(parents=True)
+    (staging_dir / "wavs" / "half_written.wav").write_bytes(b"partial")
+
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert wav_names(dataset_dir) == ["yt_vid1_clip_0001.wav"]
+    assert not staging_dir.exists()
+
+
+# --- audio: where each clip's wav comes from -----------------------------
+
+
+def test_compile_cuts_from_full_wav_at_the_reviewed_bounds(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video_with_full_wav(
+        youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")]
+    )
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 1
+    samples, rate = sf.read(
+        dataset_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
+    )
+    assert rate == TARGET_RATE
+    # row("clip_0001") carries start_sec=0.0, end_sec=3.0
+    assert len(samples) == round(3.0 * TARGET_RATE)
+
+
+def test_compile_falls_back_to_a_pre_cut_clip_when_there_is_no_full_wav(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    build_video(youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")])
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 1
+    assert (dataset_dir / "wavs" / "yt_vid1_clip_0001.wav").read_bytes() == (
+        b"RIFF-not-real-audio"
     )
 
-    assert result.newly_committed == 1
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
-    ]
+
+def test_compile_prefers_full_wav_over_a_stale_pre_cut_clip(tmp_path):
+    """A reviewer's trim only ever changes review.csv's bounds, so a stale
+    pre-cut clips/*.wav must never win -- the fix would never reach the
+    dataset and nothing would error."""
+    youtube_dir = tmp_path / "youtube"
+    video_dir = build_video(
+        youtube_dir, "vid1", [row("clip_0001", assigned_voice="janeway")]
+    )
+    ramp = np.arange(round(10.0 * TARGET_RATE), dtype=np.int16)
+    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
+    dataset_dir = tmp_path / "dataset"
+
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    samples, _ = sf.read(
+        dataset_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
+    )
+    # sliced from full.wav's ramp, not the stale "RIFF-not-real-audio" bytes
+    assert samples[0] == 0
+    assert len(samples) == round(3.0 * TARGET_RATE)
 
 
-def test_review_csv_written_before_diarization_still_commits(tmp_path):
-    # a review.csv with no speaker columns at all, as written by the old code
+def test_compile_re_slices_a_clip_whose_bounds_changed(tmp_path):
+    """A trim after an earlier compile takes effect with no re-slice path:
+    the next compile cuts from full.wav at the current bounds."""
+    youtube_dir = tmp_path / "youtube"
+    rows = [row("clip_0001", assigned_voice="janeway")]
+    video_dir = build_video_with_full_wav(youtube_dir, "vid1", rows)
+    dataset_dir = tmp_path / "dataset"
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    rows[0]["end_sec"] = 5.0
+    write_review_csv(video_dir / "review.csv", rows)
+    compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    samples, _ = sf.read(
+        dataset_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
+    )
+    assert len(samples) == round(5.0 * TARGET_RATE)
+
+
+def test_compile_clamps_bounds_past_eof(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    clip_row = row("clip_0001", assigned_voice="janeway")
+    clip_row["end_sec"] = 500.0  # past the 10s fixture
+    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 1
+    samples, _ = sf.read(
+        dataset_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
+    )
+    assert len(samples) == round(10.0 * TARGET_RATE)
+
+
+def test_compile_skips_a_row_that_clamps_to_zero_frames(tmp_path):
+    youtube_dir = tmp_path / "youtube"
+    clip_row = row("clip_0001", assigned_voice="janeway")
+    clip_row["start_sec"] = 500.0  # past EOF, so start clamps to the same
+    clip_row["end_sec"] = 600.0  # frame end does, leaving nothing to write
+    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
+    dataset_dir = tmp_path / "dataset"
+
+    result = compile_dataset_for("janeway", youtube_dir, dataset_dir)
+
+    assert result.clip_count == 0
+    assert result.skipped_count == 1
+    assert read_metadata(dataset_dir) == []
+    assert wav_names(dataset_dir) == []
+
+
+def test_compile_skips_a_row_with_no_audio_at_all(tmp_path):
     youtube_dir = tmp_path / "youtube"
     video_dir = youtube_dir / "vid1"
-    (video_dir / "clips").mkdir(parents=True)
-    (video_dir / "clips" / "clip_0001.wav").write_bytes(b"RIFF-not-real-audio")
-    (video_dir / "review.csv").write_text(
-        "clip_id,keep,quality_score,flagged,duration_sec,start_sec,end_sec,text\n"
-        "clip_0001,1,22.0,0,3.0,0.0,3.0,an older line\n",
-        encoding="utf-8",
+    video_dir.mkdir(parents=True)
+    write_review_csv(
+        video_dir / "review.csv", [row("clip_0001", assigned_voice="janeway")]
     )
-    out_dir = tmp_path / "dataset"
 
-    result = commit_reviewed_clips(youtube_dir, out_dir)
+    result = compile_dataset_for("janeway", youtube_dir, tmp_path / "dataset")
 
-    assert result.newly_committed == 1
-    assert read_metadata(out_dir) == ["yt_vid1_clip_0001|an older line"]
-
-
-def test_out_dir_none_skips_unmapped_and_undiarized_rows(tmp_path):
-    """The batched, multi-character commit route has no single "committing
-    character" to fall back to. out_dir=None must leave those rows
-    uncommitted instead of guessing -- never silently route them anywhere."""
-    youtube_dir = tmp_path / "youtube"
-    # SPEAKER_00 is mapped, SPEAKER_09 is not, and clip_0003 was never diarized
-    video_dir = build_video(
-        youtube_dir,
-        "vid1",
-        [
-            row("clip_0001", speaker_label="SPEAKER_00"),
-            row("clip_0002", speaker_label="SPEAKER_09"),
-            row("clip_0003", speaker_label=""),
-        ],
-    )
-    write_speaker_map(video_dir, {"SPEAKER_00": "janeway"})
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, None, dataset_dir_for)
-
-    assert result.newly_committed == 1
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid1_clip_0001|line for clip_0001"
-    ]
-    # neither the unmapped speaker nor the undiarized row landed anywhere,
-    # and neither counted as committed
-    committed_text = (youtube_dir / "vid1" / "committed.csv").read_text()
-    assert "clip_0001" in committed_text
-    assert "clip_0002" not in committed_text
-    assert "clip_0003" not in committed_text
+    assert result.clip_count == 0
+    assert result.skipped_count == 1
 
 
-def test_out_dir_none_with_no_map_at_all_skips_every_row(tmp_path):
-    """A video with no speaker_map.json and dataset_dir_for set is already
-    skipped at the video level (see the shared-scan test above). out_dir=None
-    is the second guard: even if that video-level skip were ever bypassed,
-    the row-level fallback must not guess either."""
-    youtube_dir = tmp_path / "youtube"
-    build_video(youtube_dir, "vid1", [row("clip_0001")])
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, None, dataset_dir_for)
-
-    assert result.newly_committed == 0
-    assert result.committed_by_target == {}
+# --- speaker map: unchanged, still the diarization record ----------------
 
 
 def test_speaker_map_round_trips(tmp_path):
@@ -305,7 +405,7 @@ def test_speaker_map_round_trips(tmp_path):
 
 def test_write_speaker_map_merges_instead_of_overwriting(tmp_path):
     """A second character's claim on a shared video must not erase the first
-    character's earlier speaker assignments (round-1 finding)."""
+    character's earlier speaker assignments."""
     write_speaker_map(tmp_path, {"SPEAKER_00": "janeway"})
 
     written = write_speaker_map(tmp_path, {"SPEAKER_01": "chakotay"})
@@ -326,8 +426,7 @@ def test_write_speaker_map_allows_resubmitting_the_same_value(tmp_path):
 
 def test_write_speaker_map_rejects_reassigning_an_already_mapped_speaker(tmp_path):
     """A second character's claim must not silently move a speaker's clips
-    away from the character an earlier claim already assigned it to -- the
-    same corruption class patch_clips's 409 guards against, one layer up."""
+    away from the character an earlier claim already assigned it to."""
     write_speaker_map(tmp_path, {"SPEAKER_00": "janeway"})
 
     with pytest.raises(SpeakerMapConflict) as exc_info:
@@ -338,191 +437,3 @@ def test_write_speaker_map_rejects_reassigning_an_already_mapped_speaker(tmp_pat
     assert json.loads((tmp_path / "speaker_map.json").read_text(encoding="utf-8")) == {
         "SPEAKER_00": "janeway"
     }
-
-
-def test_commit_skips_another_characters_unmapped_video_on_a_shared_scan(tmp_path):
-    """The round-1 regression test: this story moves every character's
-    ingested videos into one shared work/youtube/ directory. Before this
-    fix, commit_reviewed_clips fell back to "assume this video is mine" for
-    any video with no speaker_map.json -- correct when youtube_dir held only
-    one character's videos, unsafe once it is shared. stage_youtube_review
-    auto-writes review.csv with keep=1 rows before any human review or
-    speaker_map.json exists, so a character committing while an unrelated
-    video sits mid-ingest for someone else must never sweep it in.
-    """
-    youtube_dir = tmp_path / "youtube"
-    # janeway's video: reviewed and explicitly mapped to janeway
-    janeway_video = build_video(
-        youtube_dir, "vid_janeway", [row("clip_0001", speaker_label="SPEAKER_00")]
-    )
-    write_speaker_map(janeway_video, {"SPEAKER_00": "janeway"})
-    # chakotay's video: auto-written keep=1 rows from stage_youtube_review,
-    # but chakotay has not reviewed it or written a speaker_map.json yet
-    build_video(youtube_dir, "vid_chakotay", [row("clip_0001")])
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    result = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
-
-    assert read_metadata(dataset_dir_for("janeway")) == [
-        "yt_vid_janeway_clip_0001|line for clip_0001"
-    ]
-    # the unmapped video's clip must never land in janeway's dataset, and
-    # nothing marks it committed either -- chakotay's own later commit run
-    # must still see it as pending
-    assert read_metadata(dataset_dir_for("chakotay")) == []
-    assert not (youtube_dir / "vid_chakotay" / "committed.csv").exists()
-    assert result.newly_committed == 1
-
-
-def test_commit_discards_clips_whose_map_routes_every_speaker_to_null(tmp_path):
-    """An all-null speaker_map means the reviewer explicitly discarded every
-    speaker in this video. That must not fall back to "assume it's mine"
-    either -- same unsafe pattern as the missing-map case above, one row at a
-    time instead of one video at a time."""
-    youtube_dir = tmp_path / "youtube"
-    video_dir = build_video(
-        youtube_dir, "vid1", [row("clip_0001", speaker_label="SPEAKER_00")]
-    )
-    write_speaker_map(video_dir, {"SPEAKER_00": None})
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    result = commit_reviewed_clips(
-        youtube_dir, dataset_dir_for("janeway"), dataset_dir_for
-    )
-
-    assert result.newly_committed == 0
-    assert read_metadata(dataset_dir_for("janeway")) == []
-
-
-def test_a_second_characters_later_commit_still_sees_the_previously_skipped_video(
-    tmp_path,
-):
-    """Once chakotay reviews and maps their own video, their own commit run
-    picks it up -- the earlier skip only deferred it, it did not lose it."""
-    youtube_dir = tmp_path / "youtube"
-    build_video(youtube_dir, "vid_chakotay", [row("clip_0001")])
-    work_dir = tmp_path / "work"
-
-    def dataset_dir_for(character: str) -> Path:
-        return work_dir / character / "dataset"
-
-    # janeway's commit runs first, while chakotay's video is still unmapped
-    commit_reviewed_clips(youtube_dir, dataset_dir_for("janeway"), dataset_dir_for)
-    assert read_metadata(dataset_dir_for("chakotay")) == []
-
-    # chakotay reviews and maps it, then commits
-    write_speaker_map(youtube_dir / "vid_chakotay", {"SPEAKER_00": "chakotay"})
-    commit_reviewed_clips(youtube_dir, dataset_dir_for("chakotay"), dataset_dir_for)
-
-    assert read_metadata(dataset_dir_for("chakotay")) == [
-        "yt_vid_chakotay_clip_0001|line for clip_0001"
-    ]
-
-
-# -- full.wav precedence (this story) ------------------------------------
-
-
-def build_video_with_full_wav(
-    youtube_dir: Path, video_id: str, rows: list[dict], num_seconds: float = 10.0
-) -> Path:
-    """A video with full.wav present, no clips/*.wav -- the shape every
-    video takes once plan_clips replaces chunk_clips (Stage 2)."""
-    video_dir = youtube_dir / video_id
-    video_dir.mkdir(parents=True, exist_ok=True)
-    ramp = np.arange(round(num_seconds * TARGET_RATE), dtype=np.int16)
-    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
-    write_review_csv(video_dir / "review.csv", rows)
-    return video_dir
-
-
-def test_commit_cuts_from_full_wav_at_the_reviewed_bounds(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    build_video_with_full_wav(
-        youtube_dir, "vid1", [row("clip_0001", speaker_label="")]
-    )
-    out_dir = tmp_path / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert result.newly_committed == 1
-    committed_wav = out_dir / "wavs" / "yt_vid1_clip_0001.wav"
-    assert committed_wav.exists()
-    samples, rate = sf.read(committed_wav, dtype="int16")
-    assert rate == TARGET_RATE
-    # row("clip_0001") carries start_sec=0.0, end_sec=3.0
-    assert len(samples) == round(3.0 * TARGET_RATE)
-
-
-def test_commit_falls_back_to_a_pre_cut_clip_when_there_is_no_full_wav(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    build_video(youtube_dir, "vid1", [row("clip_0001")])
-    out_dir = tmp_path / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert result.newly_committed == 1
-    assert (out_dir / "wavs" / "yt_vid1_clip_0001.wav").read_bytes() == (
-        b"RIFF-not-real-audio"
-    )
-
-
-def test_commit_prefers_full_wav_over_a_stale_pre_cut_clip(tmp_path):
-    """The precedence trap this story exists to close: every currently
-    ingested video already has a pre-cut clips/*.wav. A reviewer's trim only
-    ever changes review.csv's bounds, so if the stale pre-cut file won the
-    naive "prefer the pre-cut file" ordering, the fix would never reach the
-    dataset and nothing would error."""
-    youtube_dir = tmp_path / "youtube"
-    video_dir = build_video(youtube_dir, "vid1", [row("clip_0001")])
-    ramp = np.arange(round(10.0 * TARGET_RATE), dtype=np.int16)
-    sf.write(video_dir / "full.wav", ramp, TARGET_RATE, subtype="PCM_16")
-    out_dir = tmp_path / "dataset"
-
-    commit_reviewed_clips(youtube_dir, out_dir)
-
-    committed_wav = out_dir / "wavs" / "yt_vid1_clip_0001.wav"
-    samples, _ = sf.read(committed_wav, dtype="int16")
-    # sliced from full.wav's ramp, not the stale "RIFF-not-real-audio" bytes
-    assert samples[0] == 0
-    assert len(samples) == round(3.0 * TARGET_RATE)
-
-
-def test_commit_clamps_bounds_past_eof(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    clip_row = row("clip_0001", speaker_label="")
-    clip_row["end_sec"] = 500.0  # past the 10s fixture
-    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
-    out_dir = tmp_path / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert result.newly_committed == 1
-    samples, _ = sf.read(
-        out_dir / "wavs" / "yt_vid1_clip_0001.wav", dtype="int16"
-    )
-    assert len(samples) == round(10.0 * TARGET_RATE) - round(0.0 * TARGET_RATE)
-
-
-def test_commit_skips_a_row_that_clamps_to_zero_frames(tmp_path):
-    youtube_dir = tmp_path / "youtube"
-    clip_row = row("clip_0001", speaker_label="")
-    clip_row["start_sec"] = 500.0  # past EOF, so start clamps to the same
-    clip_row["end_sec"] = 600.0  # frame end does, leaving nothing to write
-    build_video_with_full_wav(youtube_dir, "vid1", [clip_row])
-    out_dir = tmp_path / "dataset"
-
-    result = commit_reviewed_clips(youtube_dir, out_dir)
-
-    assert result.newly_committed == 0
-    assert read_metadata(out_dir) == []
-    assert not (out_dir / "wavs" / "yt_vid1_clip_0001.wav").exists()
-    committed_text = (youtube_dir / "vid1" / "committed.csv").read_text()
-    assert "clip_0001" not in committed_text

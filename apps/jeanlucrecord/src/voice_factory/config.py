@@ -32,6 +32,11 @@ CORS_ALLOW_ORIGINS_ENV_VAR = "VOICE_FACTORY_CORS_ALLOW_ORIGINS"
 # them. Unset, nothing here changes: jobs run exactly as before and the
 # orchestrator falls back to asking.
 WEBHOOK_URL_ENV_VAR = "VOICE_ORCHESTRATOR_WEBHOOK_URL"
+# Where to read clip assignments from. The orchestrator owns the review
+# record now, so a compile asks it which slices to cut. Unset, a compile
+# fails and says so - unlike the webhook above, this call is the dataset and
+# there is nothing sensible to fall back to.
+ORCHESTRATOR_URL_ENV_VAR = "VOICE_ORCHESTRATOR_URL"
 WEBHOOK_TOKEN_ENV_VAR = "VOICE_WEBHOOK_TOKEN"
 PROGRESS_INTERVAL_ENV_VAR = "VOICE_PROGRESS_INTERVAL_SECONDS"
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 30.0
