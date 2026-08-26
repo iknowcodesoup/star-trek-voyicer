@@ -59,12 +59,17 @@ def resolve_video_meta(url: str) -> dict:
     """
     result = subprocess.run(
         [
-            sys.executable, "-m", "yt_dlp", "--skip-download",
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--skip-download",
             "--print",
             "%(.{id,title,duration,channel,uploader,webpage_url,thumbnail})j",
             url,
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
     try:
@@ -116,9 +121,35 @@ def ensure_video_meta(url: str, video_dir: Path) -> Path | None:
     return write_video_meta(video_dir, resolve_video_meta(url))
 
 
+def separate_vocals(raw_file: Path, work_dir: Path) -> Path:
+    """Run Demucs on raw_file and return the path to its isolated vocals stem.
+
+    Background music and noise confuse both the transcript and the trained
+    voice, and a fixed highpass/lowpass/loudnorm filter cannot tell voice from
+    noise the way a source-separation model can. Demucs picks the GPU by
+    default when one is present.
+    """
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demucs",
+            "-n",
+            "htdemucs",
+            "--two-stems",
+            "vocals",
+            "-o",
+            str(work_dir),
+            str(raw_file),
+        ],
+        check=True,
+    )
+    return work_dir / "htdemucs" / raw_file.stem / "vocals.wav"
+
+
 def download_audio(url: str, out_wav: Path) -> Path:
-    """Download best audio and convert to 22050 Hz mono WAV with loudness
-    normalization. No-op if out_wav already exists."""
+    """Download best audio, isolate vocals with Demucs, and convert the
+    result to 22050 Hz mono 16-bit WAV. No-op if out_wav already exists."""
     if out_wav.exists():
         print(f"  Using cached audio: {out_wav}")
         return out_wav
@@ -128,8 +159,14 @@ def download_audio(url: str, out_wav: Path) -> Path:
         raw_template = str(Path(dl_dir) / "raw.%(ext)s")
         subprocess.run(
             [
-                sys.executable, "-m", "yt_dlp", "-f", "bestaudio",
-                "-o", raw_template, url,
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "-f",
+                "bestaudio",
+                "-o",
+                raw_template,
+                url,
             ],
             check=True,
         )
@@ -139,10 +176,20 @@ def download_audio(url: str, out_wav: Path) -> Path:
             raise RuntimeError(f"yt-dlp downloaded no audio file for {url}")
         raw_file = candidates[0]
 
+        vocals_wav = separate_vocals(raw_file, Path(dl_dir))
+
         subprocess.run(
             [
-                "ffmpeg", "-y", "-i", str(raw_file),
-                "-ar", str(TARGET_RATE), "-ac", "1", "-af", "loudnorm",
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(vocals_wav),
+                "-ar",
+                str(TARGET_RATE),
+                "-ac",
+                "1",
+                "-sample_fmt",
+                "s16",
                 str(out_wav),
             ],
             check=True,
@@ -168,7 +215,9 @@ def transcribe(
 
     print(f"Transcribing with faster-whisper ({model_size})...")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _info = model.transcribe(str(wav_path), beam_size=5, word_timestamps=False)
+    segments, _info = model.transcribe(
+        str(wav_path), beam_size=5, word_timestamps=False
+    )
 
     results = []
     for segment in segments:
@@ -195,7 +244,9 @@ PAD_AFTER_SEC = 0.35
 RETAIN_FLOOR_SEC = 0.3
 RETAIN_CEILING_SEC = 60.0
 
-ExcludedReason = Literal["", "too_short", "too_long", "low_quality", "no_single_speaker"]
+ExcludedReason = Literal[
+    "", "too_short", "too_long", "low_quality", "no_single_speaker"
+]
 
 
 def plan_clips(
@@ -252,13 +303,15 @@ def plan_clips(
             gap_end_midpoint = (seg["end"] + segments[i + 1]["start"]) / 2
             end = min(end, gap_end_midpoint)
 
-        clips.append({
-            "clip_id": clip_id,
-            "start": start,
-            "end": end,
-            "duration": end - start,
-            "text": seg["text"],
-            "excluded_reason": excluded_reason,
-        })
+        clips.append(
+            {
+                "clip_id": clip_id,
+                "start": start,
+                "end": end,
+                "duration": end - start,
+                "text": seg["text"],
+                "excluded_reason": excluded_reason,
+            }
+        )
 
     return clips

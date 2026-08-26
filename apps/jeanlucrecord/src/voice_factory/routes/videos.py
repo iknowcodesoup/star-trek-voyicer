@@ -208,6 +208,23 @@ async def get_clip_audio(
     return FileResponse(clip_path, media_type="audio/wav")
 
 
+@router.get("/videos/{video_id}/transcript_text")
+async def get_transcript_text(
+    video_id: str,
+    start_sec: float = Query(..., ge=0.0),
+    end_sec: float = Query(..., ge=0.0),
+) -> dict:
+    """The video's own transcript, joined over one time window.
+
+    Backs the orchestrator's resize-fills-the-text behaviour: a clip's text
+    tracks its transcript until a reviewer types over it, and this is what
+    it tracks against. No transcript.json answers "" rather than 404 - a
+    caller that gets nothing back leaves the clip's text exactly as it was.
+    """
+    text = clip_review.transcript_text_for_range(video_id, start_sec, end_sec)
+    return {"text": text}
+
+
 def _requested_bounds(bounds: str | None) -> tuple[float, float] | None:
     """The caller's window, or None when it named none.
 

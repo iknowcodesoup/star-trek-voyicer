@@ -1,6 +1,7 @@
 """Tests for the video-scoped routes in routes/videos.py."""
 
 import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -410,6 +411,68 @@ def test_get_video_speakers_groups_by_label_and_counts_clips(client, work_dir):
 
 def test_get_video_speakers_404s_for_an_unknown_video(client, work_dir):
     response = client.get("/videos/nope/speakers")
+
+    assert response.status_code == 404
+
+
+def test_get_transcript_text_joins_majority_overlapping_segments(client, work_dir):
+    video_dir = work_dir / "youtube" / "vid1"
+    video_dir.mkdir(parents=True)
+    (video_dir / "transcript.json").write_text(
+        json.dumps(
+            [
+                {"start": 0.0, "end": 3.0, "text": "Captain, we're losing power."},
+                {"start": 3.0, "end": 6.0, "text": "I need more time."},
+                {"start": 6.0, "end": 9.0, "text": "Make it so."},
+            ]
+        )
+    )
+
+    response = client.get(
+        "/videos/vid1/transcript_text", params={"start_sec": 2.0, "end_sec": 5.0}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "I need more time."
+
+
+def test_get_transcript_text_drops_a_barely_grazed_segment(client, work_dir):
+    """The reported bug: a trim that just grazes the start of the next
+    sentence must not pull that whole sentence in."""
+    video_dir = work_dir / "youtube" / "vid1"
+    video_dir.mkdir(parents=True)
+    (video_dir / "transcript.json").write_text(
+        json.dumps(
+            [
+                {"start": 0.0, "end": 3.0, "text": "Captain, we're losing power."},
+                {"start": 3.0, "end": 6.0, "text": "I need more time."},
+            ]
+        )
+    )
+
+    response = client.get(
+        "/videos/vid1/transcript_text", params={"start_sec": 0.0, "end_sec": 3.2}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "Captain, we're losing power."
+
+
+def test_get_transcript_text_is_empty_with_no_transcript_yet(client, work_dir):
+    (work_dir / "youtube" / "vid1").mkdir(parents=True)
+
+    response = client.get(
+        "/videos/vid1/transcript_text", params={"start_sec": 0.0, "end_sec": 3.0}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == ""
+
+
+def test_get_transcript_text_404s_for_an_unknown_video(client, work_dir):
+    response = client.get(
+        "/videos/nope/transcript_text", params={"start_sec": 0.0, "end_sec": 3.0}
+    )
 
     assert response.status_code == 404
 

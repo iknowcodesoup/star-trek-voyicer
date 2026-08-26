@@ -75,6 +75,33 @@ def video_summary(video_directory: Path) -> dict:
     }
 
 
+def transcript_text_for_range(video_id: str, start_sec: float, end_sec: float) -> str:
+    """The video's own transcript, joined over one time window.
+
+    transcript.json holds faster-whisper's sentence-level segments, not
+    word-level timing (see youtube_ingest.transcribe), so this cannot slice a
+    segment's text at the exact selection edge. Instead it keeps a segment
+    only when the selection covers more than half of it, so a trim that just
+    grazes the start of the next sentence drops that sentence instead of
+    pulling it in whole. "" means no transcript.json yet - a video ingested
+    before this existed, or one still mid-pipeline - and the caller treats
+    that as nothing to fill in with.
+    """
+    from voice_factory.core.youtube_ingest import TRANSCRIPT_NAME, read_json
+
+    path = video_dir(video_id) / TRANSCRIPT_NAME
+    if not path.exists():
+        return ""
+    segments = read_json(path)
+    overlapping = []
+    for segment in segments:
+        overlap = min(segment["end"], end_sec) - max(segment["start"], start_sec)
+        duration = segment["end"] - segment["start"]
+        if overlap > 0 and duration > 0 and overlap / duration > 0.5:
+            overlapping.append(segment["text"].strip())
+    return " ".join(overlapping)
+
+
 def keep_from_cell(value: str) -> bool | None:
     """"1"/"0"/"" -> True/False/None. Empty is unreviewed -- neither kept nor
     excluded -- and distinct from an old review.csv's "0", which still means
