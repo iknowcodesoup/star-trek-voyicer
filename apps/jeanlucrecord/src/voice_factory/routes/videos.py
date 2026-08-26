@@ -42,7 +42,7 @@ router = APIRouter(tags=["Videos"])
 MIN_CLIP_DURATION_SEC = 1.0
 MAX_CLIP_DURATION_SEC = 30.0
 
-MAX_PAD_SEC = 10.0
+MAX_PAD_SEC = 300.0
 
 
 def _length_excluded_reason(duration_sec: float) -> str:

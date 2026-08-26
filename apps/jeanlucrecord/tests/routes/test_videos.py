@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 
 from voice_factory.core.audio_slicing import TARGET_RATE
+from voice_factory.routes.videos import MAX_PAD_SEC
 from voice_factory.core.youtube_ingest import DIARIZATION_NAME
 from voice_factory.repositories.review_csv_repository import write_review_csv
 from voice_factory.repositories.video_meta_repository import write_video_meta_file
@@ -469,7 +470,8 @@ def test_get_clip_audio_pad_sec_over_the_max_is_422(client, work_dir):
     build_video_with_full_wav(work_dir, "vid1", [row("clip_0001")])
 
     response = client.get(
-        "/videos/vid1/clips/clip_0001/audio", params={"pad_sec": 10.1}
+        "/videos/vid1/clips/clip_0001/audio",
+        params={"pad_sec": MAX_PAD_SEC + 0.1},
     )
 
     assert response.status_code == 422
