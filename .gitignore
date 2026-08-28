@@ -1,14 +1,135 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
+# ==============================================================================
+# OS & Environment
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ==============================================================================
+# IDEs & Editors
+# ==============================================================================
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# Environment Variables
+# ==============================================================================
+# No slash, so these match at any depth, covering the per-app copies too.
+.env
+.env.*
+!.env*.example
+.venv/
+venv/
+ENV/
+env/
+
+# ==============================================================================
+# SDD Scaffolding
+# ==============================================================================
+_bmad/
+bmad-*
+.bmad-*
+.bmadshow/integrations.json
+
+# ==============================================================================
+# Node.js & Monorepo Artifacts
+# ==============================================================================
+node_modules/
+jspm_packages/
+.npm/
+.yarn/
+.turbo/
+.nx/
+.cache/
+
+# Keep yarn lock files but ignore cache directories
+!.yarn/cache
+!.yarn/releases
+!.yarn/plugins
+!.yarn/sdks
+!.yarn/versions
+
+# npm / yarn / pnpm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==============================================================================
+# Next.js & Frontend Build Artifacts
+# ==============================================================================
+.next/
+out/
 build/
 dist/
-wheels/
-*.egg-info
-.env
-.cache
+.swc/
+.vite/
+*.tsbuildinfo
+next-env.d.ts
 
-# Virtual environments
-.venv
+# ==============================================================================
+# Python
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# Test & Coverage Output
+# ==============================================================================
+coverage/
+.coverage
+.coverage.*
+.nyc_output/
+reports/
+
+# ==============================================================================
+# TLS (mkcert, local dev only - see infra/nginx/make-certs.ps1)
+# ==============================================================================
+infra/nginx/certs/
+
+# ==============================================================================
+# Docker / Runtime
+# ==============================================================================
+*.log
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+_bmad/render/
+
+# ==============================================================================
+# Models
+# ==============================================================================
 *.onnx
 *.onnx.json
